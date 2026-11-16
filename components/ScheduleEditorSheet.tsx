@@ -6,12 +6,12 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  Dimensions,
   Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import {
@@ -114,6 +114,9 @@ export function ScheduleEditorSheet({
   // Drag the top bar (handle + title) down to close the sheet.
   // Runs on the UI thread (gesture-handler + reanimated), so it follows the finger smoothly.
   const dragY = useSharedValue(0);
+  // Read on the JS side: gesture callbacks run on the UI thread, and calling a
+  // normal JS function (like Dimensions.get) from there crashes the app.
+  const { height: screenHeight } = useWindowDimensions();
   const dragToClose = useMemo(
     () =>
       Gesture.Pan()
@@ -125,7 +128,7 @@ export function ScheduleEditorSheet({
         .onEnd((e) => {
           if (e.translationY > 120 || e.velocityY > 800) {
             dragY.value = withTiming(
-              Dimensions.get("window").height,
+              screenHeight,
               { duration: 180 },
               (finished) => {
                 if (finished) runOnJS(onClose)();
@@ -135,7 +138,7 @@ export function ScheduleEditorSheet({
             dragY.value = withSpring(0, { damping: 20, stiffness: 250 });
           }
         }),
-    [dragY, onClose],
+    [dragY, onClose, screenHeight],
   );
   const sheetStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: dragY.value }],
@@ -222,6 +225,10 @@ export function ScheduleEditorSheet({
       transparent
       animationType="slide"
       onRequestClose={onClose}
+      // Draw behind the status and navigation bars (the app is edge-to-edge).
+      // Without this, a strip at the bottom showed the screen underneath.
+      statusBarTranslucent
+      navigationBarTranslucent
     >
       {/* Gesture handler needs its own root inside a Modal on Android. */}
       <GestureHandlerRootView style={styles.overlay}>

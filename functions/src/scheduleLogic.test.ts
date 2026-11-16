@@ -179,7 +179,7 @@ describe('planDevice', () => {
     assert.deepEqual(plan.deviceUpdates, {});
   });
 
-  it('lets a later overlapping schedule take over, then stops at its end', () => {
+  it('lets a later overlapping schedule take over, then goes back to the first one', () => {
     const schedules = {
       a: schedule({ startTime: '07:00', endTime: '08:00', temperature: 40, lastStartDate: MON }),
       b: schedule({ startTime: '07:15', endTime: '07:45', temperature: 70, mode: 'electric' }),
@@ -188,9 +188,54 @@ describe('planDevice', () => {
     assert.deepEqual(takeover.deviceUpdates, { isOn: true, target_Temp: 70, mode: 'electric', activeScheduleId: 'b' });
 
     schedules.b.lastStartDate = MON;
-    const end = planDevice(schedules, { activeScheduleId: 'b' }, pkt(MON, '07:45'));
-    // "a" is still open but already ran today, so it does not restart.
+    const during = planDevice(schedules, { activeScheduleId: 'b' }, pkt(MON, '07:30'));
+    assert.deepEqual(during.deviceUpdates, {});
+
+    // B ends at 7:45 while A runs until 8:00: back to A's settings.
+    const back = planDevice(schedules, { activeScheduleId: 'b' }, pkt(MON, '07:45'));
+    assert.deepEqual(back.deviceUpdates, { isOn: true, target_Temp: 40, mode: 'gas', activeScheduleId: 'a' });
+    assert.deepEqual(back.scheduleUpdates, {});
+
+    const end = planDevice(schedules, { activeScheduleId: 'a' }, pkt(MON, '08:00'));
     assert.deepEqual(end.deviceUpdates, { isOn: false, activeScheduleId: null });
+  });
+
+  it('turns off (no going back) when the earlier schedule has also ended', () => {
+    const schedules = {
+      a: schedule({ startTime: '07:00', endTime: '07:30', lastStartDate: MON }),
+      b: schedule({ startTime: '07:15', endTime: '07:45', lastStartDate: MON }),
+    };
+    const plan = planDevice(schedules, { activeScheduleId: 'b' }, pkt(MON, '07:45'));
+    assert.deepEqual(plan.deviceUpdates, { isOn: false, activeScheduleId: null });
+  });
+
+  it('goes back to the most recently started of several open schedules', () => {
+    const schedules = {
+      a: schedule({ startTime: '07:00', endTime: '09:00', temperature: 40, lastStartDate: MON }),
+      b: schedule({ startTime: '07:10', endTime: '09:00', temperature: 50, lastStartDate: MON }),
+      c: schedule({ startTime: '07:20', endTime: '07:40', temperature: 70, lastStartDate: MON }),
+    };
+    const plan = planDevice(schedules, { activeScheduleId: 'c' }, pkt(MON, '07:40'));
+    assert.equal(plan.deviceUpdates.activeScheduleId, 'b');
+    assert.equal(plan.deviceUpdates.target_Temp, 50);
+  });
+
+  it('goes back to an open schedule when the running one is disabled', () => {
+    const schedules = {
+      a: schedule({ startTime: '07:00', endTime: '08:00', temperature: 40, lastStartDate: MON }),
+      b: schedule({ startTime: '07:15', endTime: '07:45', temperature: 70, lastStartDate: MON, enabled: false }),
+    };
+    const plan = planDevice(schedules, { activeScheduleId: 'b' }, pkt(MON, '07:20'));
+    assert.deepEqual(plan.deviceUpdates, { isOn: true, target_Temp: 40, mode: 'gas', activeScheduleId: 'a' });
+  });
+
+  it('does not go back after a manual on/off (activeScheduleId cleared)', () => {
+    const schedules = {
+      a: schedule({ startTime: '07:00', endTime: '08:00', lastStartDate: MON }),
+      b: schedule({ startTime: '07:15', endTime: '07:45', lastStartDate: MON }),
+    };
+    const plan = planDevice(schedules, { activeScheduleId: null }, pkt(MON, '07:45'));
+    assert.deepEqual(plan.deviceUpdates, {});
   });
 
   it('when two open schedules start together, the most recent start wins and both are marked', () => {

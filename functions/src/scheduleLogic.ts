@@ -18,11 +18,15 @@
  *   3. When an open, not-yet-started schedule is found, the geyser is
  *      turned on with that schedule's temperature and mode. If several
  *      start together, the one that started most recently wins.
- *   4. The function turns the geyser off only if the schedule it started
- *      is still the "active" one (`activeScheduleId`) and its window has
- *      ended, or that schedule was disabled or deleted.
- *      The app clears `activeScheduleId` when the user switches the geyser
- *      on or off by hand, so a manual choice is never overridden.
+ *   4. When the running schedule (`activeScheduleId`) ends, or is disabled
+ *      or deleted, the function goes BACK to another schedule whose window
+ *      is still open (e.g. A 7:00-8:00 and B 7:15-7:45: at 7:45 the geyser
+ *      returns to A's temperature and mode until 8:00). If several are
+ *      still open, the one that started most recently is used. If none is
+ *      open, the geyser is turned off.
+ *   5. The app clears `activeScheduleId` when the user switches the geyser
+ *      on or off by hand, so a manual choice is never overridden: no
+ *      switching back and no turning off until the next schedule starts.
  */
 
 export type Mode = 'electric' | 'gas' | 'hybrid';
@@ -228,8 +232,10 @@ export function planDevice(
   const plan: DevicePlan = { deviceUpdates: {}, scheduleUpdates: {}, log: [] };
   const activeId = device?.activeScheduleId || null;
 
-  // Collect every valid, enabled schedule whose window is open right now.
-  const starting: Array<{ id: string; schedule: Schedule; occurrence: OpenOccurrence }> = [];
+  // Collect every valid, enabled schedule whose window is open right now:
+  // `starting` = not yet started for this occurrence, `resumable` = already started.
+  const starting: { id: string; schedule: Schedule; occurrence: OpenOccurrence }[] = [];
+  const resumable: { id: string; schedule: Schedule; occurrence: OpenOccurrence }[] = [];
   let activeStillOpen = false;
 
   for (const [id, raw] of Object.entries(schedules || {})) {
@@ -248,12 +254,18 @@ export function planDevice(
     if (id === activeId) activeStillOpen = true;
     if (schedule.lastStartDate !== occurrence.date) {
       starting.push({ id, schedule, occurrence });
+    } else if (id !== activeId) {
+      resumable.push({ id, schedule, occurrence });
     }
   }
 
+  // Most recently started first (smallest elapsed). Ties: stable order by id.
+  type Candidate = { id: string; occurrence: OpenOccurrence };
+  const byMostRecent = (a: Candidate, b: Candidate) =>
+    a.occurrence.elapsedMinutes - b.occurrence.elapsedMinutes || a.id.localeCompare(b.id);
+
   if (starting.length > 0) {
-    // Most recently started wins (smallest elapsed). Ties: keep a stable order by id.
-    starting.sort((a, b) => a.occurrence.elapsedMinutes - b.occurrence.elapsedMinutes || a.id.localeCompare(b.id));
+    starting.sort(byMostRecent);
     const winner = starting[0];
 
     plan.deviceUpdates = {
@@ -274,11 +286,24 @@ export function planDevice(
     return plan;
   }
 
-  // Nothing new to start. Stop the running schedule if its window is over
-  // (or it was disabled / deleted / became invalid).
+  // Nothing new to start. If the running schedule is over (or was disabled /
+  // deleted / became invalid), go back to another schedule that is still
+  // open, or turn the geyser off.
   if (activeId && !activeStillOpen) {
-    plan.deviceUpdates = { isOn: false, activeScheduleId: null };
-    plan.log.push(`stop ${activeId}`);
+    if (resumable.length > 0) {
+      resumable.sort(byMostRecent);
+      const back = resumable[0];
+      plan.deviceUpdates = {
+        isOn: true,
+        target_Temp: back.schedule.temperature,
+        mode: back.schedule.mode,
+        activeScheduleId: back.id,
+      };
+      plan.log.push(`${activeId} ended; back to ${back.id} (${back.schedule.temperature}°C, ${back.schedule.mode})`);
+    } else {
+      plan.deviceUpdates = { isOn: false, activeScheduleId: null };
+      plan.log.push(`stop ${activeId}`);
+    }
   }
 
   return plan;
