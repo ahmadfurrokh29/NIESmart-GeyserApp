@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   findOpenOccurrence,
+  getWindowMinutes,
   getLocalNow,
   normalizeDays,
   parseStartTime,
@@ -23,7 +24,7 @@ const WEEKDAYS = [1, 2, 3, 4, 5];
 function schedule(overrides: Partial<Schedule> = {}): Schedule {
   return {
     startTime: '07:00',
-    durationMinutes: 30,
+    endTime: '07:30',
     temperature: 50,
     mode: 'gas',
     days: EVERY_DAY,
@@ -73,7 +74,8 @@ describe('parseStartTime / validateSchedule / normalizeDays', () => {
     assert.match(validateSchedule(schedule({ days: [] }))!, /no days/);
     assert.match(validateSchedule(schedule({ days: [7] }))!, /bad days/);
     assert.match(validateSchedule(schedule({ temperature: 120 }))!, /temperature/);
-    assert.match(validateSchedule(schedule({ durationMinutes: 0 }))!, /duration/);
+    assert.match(validateSchedule(schedule({ endTime: '07:00' }))!, /same as start/);
+    assert.match(validateSchedule(schedule({ endTime: '25:00' }))!, /bad endTime/);
     assert.match(validateSchedule(null)!, /not an object/);
   });
 
@@ -84,9 +86,24 @@ describe('parseStartTime / validateSchedule / normalizeDays', () => {
   });
 });
 
+describe('getWindowMinutes', () => {
+  it('works out the length from start and end time', () => {
+    assert.equal(getWindowMinutes(schedule({ startTime: '07:00', endTime: '07:30' })), 30);
+    assert.equal(getWindowMinutes(schedule({ startTime: '23:00', endTime: '01:00' })), 120); // overnight
+    assert.equal(getWindowMinutes(schedule({ startTime: '07:00', endTime: '06:59' })), 1439);
+    assert.equal(getWindowMinutes(schedule({ startTime: '07:00', endTime: '07:00' })), null);
+  });
+
+  it('still understands old schedules that only have durationMinutes', () => {
+    const old = { ...schedule(), endTime: undefined, durationMinutes: 45 };
+    assert.equal(getWindowMinutes(old), 45);
+    assert.equal(validateSchedule(old), null);
+  });
+});
+
 describe('findOpenOccurrence', () => {
   it('is open from the start minute until just before the end', () => {
-    const s = schedule({ startTime: '07:00', durationMinutes: 30 });
+    const s = schedule({ startTime: '07:00', endTime: '07:30' });
     assert.equal(findOpenOccurrence(s, pkt(MON, '06:59')), null);
     assert.deepEqual(findOpenOccurrence(s, pkt(MON, '07:00')), { date: MON, elapsedMinutes: 0 });
     assert.deepEqual(findOpenOccurrence(s, pkt(MON, '07:29')), { date: MON, elapsedMinutes: 29 });
@@ -100,14 +117,14 @@ describe('findOpenOccurrence', () => {
   });
 
   it('handles a window that crosses midnight, counting it on the start day', () => {
-    const s = schedule({ startTime: '23:30', durationMinutes: 60, days: [1] }); // Monday only
+    const s = schedule({ startTime: '23:30', endTime: '00:30', days: [1] }); // Monday only
     assert.deepEqual(findOpenOccurrence(s, pkt(MON, '23:45')), { date: MON, elapsedMinutes: 15 });
     assert.deepEqual(findOpenOccurrence(s, pkt(TUE, '00:15')), { date: MON, elapsedMinutes: 45 });
     assert.equal(findOpenOccurrence(s, pkt(TUE, '00:30')), null);
   });
 
   it('does not run an overnight window if the start day is not selected', () => {
-    const s = schedule({ startTime: '23:30', durationMinutes: 60, days: [2] }); // Tuesday only
+    const s = schedule({ startTime: '23:30', endTime: '00:30', days: [2] }); // Tuesday only
     assert.equal(findOpenOccurrence(s, pkt(TUE, '00:15')), null); // that window started Monday
   });
 
@@ -164,8 +181,8 @@ describe('planDevice', () => {
 
   it('lets a later overlapping schedule take over, then stops at its end', () => {
     const schedules = {
-      a: schedule({ startTime: '07:00', durationMinutes: 60, temperature: 40, lastStartDate: MON }),
-      b: schedule({ startTime: '07:15', durationMinutes: 30, temperature: 70, mode: 'electric' }),
+      a: schedule({ startTime: '07:00', endTime: '08:00', temperature: 40, lastStartDate: MON }),
+      b: schedule({ startTime: '07:15', endTime: '07:45', temperature: 70, mode: 'electric' }),
     };
     const takeover = planDevice(schedules, { activeScheduleId: 'a' }, pkt(MON, '07:15'));
     assert.deepEqual(takeover.deviceUpdates, { isOn: true, target_Temp: 70, mode: 'electric', activeScheduleId: 'b' });
@@ -178,8 +195,8 @@ describe('planDevice', () => {
 
   it('when two open schedules start together, the most recent start wins and both are marked', () => {
     const schedules = {
-      a: schedule({ startTime: '07:00', durationMinutes: 60, temperature: 40 }),
-      b: schedule({ startTime: '07:15', durationMinutes: 30, temperature: 70 }),
+      a: schedule({ startTime: '07:00', endTime: '08:00', temperature: 40 }),
+      b: schedule({ startTime: '07:15', endTime: '07:45', temperature: 70 }),
     };
     const plan = planDevice(schedules, {}, pkt(MON, '07:20'));
     assert.equal(plan.deviceUpdates.activeScheduleId, 'b');

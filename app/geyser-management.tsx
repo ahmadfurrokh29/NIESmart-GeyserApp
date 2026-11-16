@@ -3,7 +3,7 @@ import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { CustomAlert, showError, showSuccess } from '../components/CustomAlert';
+import { CustomAlert, showConfirm, showError, showSuccess } from '../components/CustomAlert';
 import { DarkCard } from '../components/DarkCard';
 import { theme } from '../constants/theme';
 // Temporarily using Mock Geyser Context for testing - switch back to GeyserContext when Firebase is configured

@@ -1,6 +1,5 @@
 import {
     get,
-    off,
     onValue,
     ref,
     update
@@ -175,7 +174,9 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         
         setLoading(false);
       });
-      unsubscribers.push(() => off(deviceRef, 'value', deviceUnsubscribe));
+      // onValue returns its own unsubscribe function. (Passing it to off() did
+      // nothing, so old listeners piled up every time this effect re-ran.)
+      unsubscribers.push(deviceUnsubscribe);
     } else {
       console.log('GeyserContext - No device claimed, setting device to null');
       setDevice(null);

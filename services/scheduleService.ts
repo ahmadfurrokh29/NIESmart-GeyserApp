@@ -25,7 +25,8 @@ export interface ScheduleData {
   name: string;
   /** 24-hour local start time, "HH:mm". */
   startTime: string;
-  durationMinutes: number;
+  /** 24-hour local end time, "HH:mm". Earlier than startTime = ends the next day. */
+  endTime: string;
   temperature: number;
   mode: ScheduleMode;
   /** 0 = Sunday … 6 = Saturday */
@@ -46,7 +47,7 @@ export interface Schedule extends ScheduleData {
   synced: boolean;
 }
 
-export type NewSchedule = Pick<ScheduleData, 'startTime' | 'durationMinutes' | 'temperature' | 'mode' | 'days'> &
+export type NewSchedule = Pick<ScheduleData, 'startTime' | 'endTime' | 'temperature' | 'mode' | 'days'> &
   Partial<Pick<ScheduleData, 'name' | 'enabled'>>;
 
 type OutboxOp =
@@ -93,7 +94,13 @@ function normalizeDays(days: unknown): number[] {
 }
 
 function fromFirebase(id: string, raw: any, synced: boolean): Schedule {
-  return { ...(raw as ScheduleData), id, days: normalizeDays(raw?.days), synced };
+  const { durationMinutes, ...rest } = raw ?? {};
+  // Schedules saved before end time existed only have durationMinutes.
+  const endTime =
+    typeof rest.endTime === 'string'
+      ? rest.endTime
+      : getEndTime(String(rest.startTime ?? '00:00'), Number(durationMinutes) || 30);
+  return { ...(rest as ScheduleData), endTime, id, days: normalizeDays(rest.days), synced };
 }
 
 /** Converts "07:30 AM" / "12:05 AM" style text into 24-hour "HH:mm". */
@@ -109,11 +116,61 @@ export function formatTime12(startTime: string): string {
   return `${(h % 12 || 12).toString().padStart(2, '0')}:${m.toString().padStart(2, '0')} ${period}`;
 }
 
-/** End time of a schedule as "HH:mm" (wraps past midnight). */
+/** Adds minutes to an "HH:mm" time, giving "HH:mm" (wraps past midnight). */
 export function getEndTime(startTime: string, durationMinutes: number): string {
   const [h, m] = startTime.split(':').map(Number);
   const total = (h * 60 + m + durationMinutes) % (24 * 60);
   return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
+}
+
+/** Minutes from start to end; an earlier end time means the next day. 0 when equal. */
+export function getWindowMinutes(startTime: string, endTime: string): number {
+  const toMin = (t: string) => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  return (toMin(endTime) - toMin(startTime) + 24 * 60) % (24 * 60);
+}
+
+/** True when the end time is on the next day (e.g. 23:00 → 01:00). */
+export function endsNextDay(startTime: string, endTime: string): boolean {
+  return endTime < startTime;
+}
+
+const WEEK_MINUTES = 7 * 24 * 60;
+
+/** The schedule's on-windows as [start, end) minutes from Sunday 00:00. */
+function weeklyWindows(s: Pick<ScheduleData, 'startTime' | 'endTime' | 'days'>): [number, number][] {
+  const [h, m] = s.startTime.split(':').map(Number);
+  const length = getWindowMinutes(s.startTime, s.endTime);
+  if (length === 0) return [];
+  return normalizeDays(s.days).map((day) => {
+    const start = day * 24 * 60 + h * 60 + m;
+    return [start, start + length] as [number, number];
+  });
+}
+
+/**
+ * Returns the first enabled schedule whose time overlaps `candidate`
+ * on any day (overnight windows included), or null.
+ */
+export function findOverlap(
+  candidate: Pick<ScheduleData, 'startTime' | 'endTime' | 'days'>,
+  others: Schedule[],
+  ignoreId?: string,
+): Schedule | null {
+  const mine = weeklyWindows(candidate);
+  for (const other of others) {
+    if (other.id === ignoreId || !other.enabled) continue;
+    for (const [bStart, bEnd] of weeklyWindows(other)) {
+      // Compare with the other window shifted a week back/forward, so
+      // Saturday-night windows that run into Sunday are caught too.
+      for (const shift of [-WEEK_MINUTES, 0, WEEK_MINUTES]) {
+        if (mine.some(([aStart, aEnd]) => aStart < bEnd + shift && bStart + shift < aEnd)) return other;
+      }
+    }
+  }
+  return null;
 }
 
 const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -136,6 +193,13 @@ export function getScheduleIcon(startTime: string): string {
   return 'weather-night';
 }
 
+function assertValidTimes(startTime: string, endTime: string): void {
+  if (!/^\d{2}:\d{2}$/.test(startTime) || !/^\d{2}:\d{2}$/.test(endTime)) {
+    throw new Error('Times must be "HH:mm"');
+  }
+  if (startTime === endTime) throw new Error('End time must be different from start time');
+}
+
 // ---------------------------------------------------------------- service
 
 type Listener = (schedules: Schedule[]) => void;
@@ -145,7 +209,7 @@ class ScheduleService {
   private remote: Record<string, Schedule> = {};
   private outbox: OutboxOp[] = [];
   private listeners = new Set<Listener>();
-  private unsubscribers: Array<() => void> = [];
+  private unsubscribers: (() => void)[] = [];
   private online = false;
   private flushing = false;
 
@@ -236,13 +300,14 @@ class ScheduleService {
   }
 
   async createSchedule(input: NewSchedule): Promise<string> {
+    assertValidTimes(input.startTime, input.endTime);
     const deviceId = this.requireDevice();
     const id = push(ref(database, `schedules/${deviceId}`)).key!; // generated offline too
     const now = Date.now();
     const data: ScheduleData = {
       name: input.name?.trim() || `Schedule ${this.getSchedules().length + 1}`,
       startTime: input.startTime,
-      durationMinutes: input.durationMinutes,
+      endTime: input.endTime,
       temperature: input.temperature,
       mode: input.mode,
       days: normalizeDays(input.days),
@@ -262,9 +327,13 @@ class ScheduleService {
    * so the edited schedule can still run today.
    */
   async updateSchedule(id: string, changes: Partial<NewSchedule>): Promise<void> {
+    const current = this.getSchedules().find((s) => s.id === id);
+    if (current && (changes.startTime !== undefined || changes.endTime !== undefined)) {
+      assertValidTimes(changes.startTime ?? current.startTime, changes.endTime ?? current.endTime);
+    }
     const data: Partial<ScheduleData> = { ...changes, updatedAt: Date.now() };
     if (changes.days) data.days = normalizeDays(changes.days);
-    if (changes.startTime !== undefined || changes.days !== undefined || changes.durationMinutes !== undefined) {
+    if (changes.startTime !== undefined || changes.days !== undefined || changes.endTime !== undefined) {
       data.lastStartDate = null;
     }
     await this.enqueue({ type: 'update', id, data });
@@ -343,10 +412,11 @@ class ScheduleService {
       if (this.deviceId !== deviceId) return;
       const match = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(String(old?.time ?? '').trim());
       if (!match) continue;
+      const startTime = to24Hour(Number(match[1]), Number(match[2]), match[3].toUpperCase() as 'AM' | 'PM');
       await this.createSchedule({
         name: old.name,
-        startTime: to24Hour(Number(match[1]), Number(match[2]), match[3].toUpperCase() as 'AM' | 'PM'),
-        durationMinutes: Math.min(1440, Math.max(1, Number(old.duration) || 30)),
+        startTime,
+        endTime: getEndTime(startTime, Math.min(1439, Math.max(1, Number(old.duration) || 30))),
         temperature: Math.min(100, Math.max(30, Number(old.temperature) || 45)),
         mode: 'electric',
         days: EVERY_DAY,

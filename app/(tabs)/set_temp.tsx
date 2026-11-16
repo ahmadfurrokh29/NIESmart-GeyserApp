@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Slider from "@react-native-community/slider";
 import { useRouter } from "expo-router";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
     Dimensions,
     Pressable,
@@ -22,9 +22,13 @@ import { useGeyser } from '../../contexts/GeyserContext';
 
 const screenWidth = Dimensions.get("window").width;
 
-const set_temp = () => {
+const SetTempScreen = () => {
   const { device, updateDeviceSettings } = useGeyser();
-  const [temp, setTemp] = useState(40);
+  const [temp, setTemp] = useState(() => Number(device?.target_Temp) || 40);
+  // True only while the user's finger is on the slider. On Android the slider
+  // also reports changes made by the app itself; ignoring those stops the
+  // screen and the slider from overwriting each other (the 40 <-> 60 flicker).
+  const isSliding = useRef(false);
   const [isApplying, setIsApplying] = useState(false);
   const [alertConfig, setAlertConfig] = useState<any>(null);
   const router = useRouter();
@@ -51,16 +55,16 @@ const set_temp = () => {
     return 'electric';
   };
 
-  // Initialize with device data
+  // Follow the device's target temperature, but only when IT changes.
+  // (Not on every device update: the ESP32 sends current_Temp every few seconds.)
+  const deviceTarget = Number(device?.target_Temp) || 40;
   useEffect(() => {
-    if (device) {
-      setTemp(device.target_Temp || 40);
-    }
-  }, [device]);
+    if (!isSliding.current) setTemp(deviceTarget);
+  }, [deviceTarget]);
 
   // Get current temperature from device data
   const currentTemp = device ? parseInt(device.current_Temp) : 25;
-  const targetTemp = device ? device.target_Temp : 40;
+  const targetTemp = deviceTarget;
 
   // Valid temperature values (10-degree gaps)
   const validTemperatures = [30, 40, 50, 60, 70, 80, 90, 100];
@@ -167,7 +171,16 @@ const set_temp = () => {
           maximumValue={100}
           step={10}
           value={temp}
-          onValueChange={(value) => setTemp(value)}
+          onSlidingStart={() => {
+            isSliding.current = true;
+          }}
+          onValueChange={(value) => {
+            if (isSliding.current) setTemp(snapToValidTemperature(value));
+          }}
+          onSlidingComplete={(value) => {
+            isSliding.current = false;
+            setTemp(snapToValidTemperature(value));
+          }}
           minimumTrackTintColor={theme.colors.primary}
           maximumTrackTintColor={theme.colors.surface}
           thumbTintColor={theme.colors.primary}
@@ -261,7 +274,7 @@ const set_temp = () => {
   );
 };
 
-export default set_temp;
+export default SetTempScreen;
 
 const styles = StyleSheet.create({
   container: {

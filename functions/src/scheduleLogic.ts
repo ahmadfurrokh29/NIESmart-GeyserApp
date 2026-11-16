@@ -8,9 +8,10 @@
  * and gets back the exact database changes to make.
  *
  * Rules, in plain English:
- *   1. A schedule is "open" while now is between its start time and
- *      start time + duration, on one of its selected days (in its timezone).
- *      A window that crosses midnight belongs to the day it started on.
+ *   1. A schedule is "open" from its start time until (not including) its
+ *      end time, on one of its selected days (in its timezone).
+ *      If the end time is earlier than the start time (e.g. 23:00 → 01:00),
+ *      the window crosses midnight and belongs to the day it started on.
  *   2. Each schedule starts at most once per occurrence. We remember the
  *      occurrence date in `lastStartDate`. So if the user turns the geyser
  *      off by hand halfway, the schedule does NOT switch it back on.
@@ -30,7 +31,10 @@ export interface Schedule {
   name?: string;
   /** Local start time, 24-hour "HH:mm", e.g. "19:00". */
   startTime: string;
-  durationMinutes: number;
+  /** Local end time, 24-hour "HH:mm". Earlier than startTime = ends next day. */
+  endTime: string;
+  /** @deprecated Old field, only read when endTime is missing. */
+  durationMinutes?: number;
   temperature: number;
   mode: Mode;
   /** Days of the week the schedule runs on. 0 = Sunday … 6 = Saturday. */
@@ -58,7 +62,6 @@ export interface DevicePlan {
 export const DEFAULT_TIMEZONE = 'Asia/Karachi';
 export const MIN_TEMPERATURE = 30;
 export const MAX_TEMPERATURE = 100;
-export const MAX_DURATION_MINUTES = 24 * 60;
 const VALID_MODES: readonly Mode[] = ['electric', 'gas', 'hybrid'];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -139,9 +142,10 @@ export function parseStartTime(value: unknown): number | null {
 export function validateSchedule(schedule: Partial<Schedule> | null | undefined): string | null {
   if (!schedule || typeof schedule !== 'object') return 'not an object';
   if (parseStartTime(schedule.startTime) === null) return `bad startTime "${schedule.startTime}"`;
-  const duration = schedule.durationMinutes;
-  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration < 1 || duration > MAX_DURATION_MINUTES) {
-    return `bad durationMinutes "${duration}"`;
+  if (getWindowMinutes(schedule) === null) {
+    return parseStartTime(schedule.endTime) === null && schedule.endTime !== undefined
+      ? `bad endTime "${schedule.endTime}"`
+      : 'end time missing or same as start time';
   }
   const temp = schedule.temperature;
   if (typeof temp !== 'number' || !Number.isFinite(temp) || temp < MIN_TEMPERATURE || temp > MAX_TEMPERATURE) {
@@ -150,6 +154,24 @@ export function validateSchedule(schedule: Partial<Schedule> | null | undefined)
   if (!VALID_MODES.includes(schedule.mode as Mode)) return `bad mode "${schedule.mode}"`;
   if (!Array.isArray(schedule.days) || schedule.days.length === 0) return 'no days selected';
   if (!schedule.days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)) return 'bad days';
+  return null;
+}
+
+/**
+ * How long the schedule's window is, in minutes (1–1439), worked out from
+ * startTime and endTime. Returns null if invalid or if end equals start.
+ * Older schedules that only have `durationMinutes` are still understood.
+ */
+export function getWindowMinutes(schedule: Partial<Schedule>): number | null {
+  const start = parseStartTime(schedule.startTime);
+  if (start === null) return null;
+  if (schedule.endTime !== undefined) {
+    const end = parseStartTime(schedule.endTime);
+    if (end === null || end === start) return null;
+    return (end - start + 24 * 60) % (24 * 60);
+  }
+  const legacy = schedule.durationMinutes;
+  if (typeof legacy === 'number' && Number.isFinite(legacy) && legacy >= 1 && legacy < 24 * 60) return legacy;
   return null;
 }
 
@@ -176,7 +198,8 @@ export interface OpenOccurrence {
  */
 export function findOpenOccurrence(schedule: Schedule, now: Date): OpenOccurrence | null {
   const startMinute = parseStartTime(schedule.startTime);
-  if (startMinute === null) return null;
+  const windowMinutes = getWindowMinutes(schedule);
+  if (startMinute === null || windowMinutes === null) return null;
   const local = getLocalNow(now, schedule.timezone || DEFAULT_TIMEZONE);
   const days = normalizeDays(schedule.days);
 
@@ -186,7 +209,7 @@ export function findOpenOccurrence(schedule: Schedule, now: Date): OpenOccurrenc
   ];
 
   for (const { day, elapsed } of candidates) {
-    if (elapsed >= 0 && elapsed < schedule.durationMinutes && days.includes(day.weekday)) {
+    if (elapsed >= 0 && elapsed < windowMinutes && days.includes(day.weekday)) {
       return { date: day.date, elapsedMinutes: elapsed };
     }
   }
@@ -245,7 +268,7 @@ export function planDevice(
       plan.scheduleUpdates[id] = { lastStartDate: occurrence.date };
     }
     plan.log.push(
-      `start ${winner.id} (${winner.schedule.startTime}, ${winner.schedule.temperature}°C, ${winner.schedule.mode})` +
+      `start ${winner.id} (${winner.schedule.startTime}–${winner.schedule.endTime ?? '?'}, ${winner.schedule.temperature}°C, ${winner.schedule.mode})` +
         (starting.length > 1 ? `; also marked ${starting.slice(1).map((s) => s.id).join(', ')}` : ''),
     );
     return plan;

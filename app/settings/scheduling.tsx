@@ -1,371 +1,200 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { DarkCard } from '../../components/DarkCard';
-import { GradientButton } from '../../components/GradientButton';
 import { MetricCard } from '../../components/MetricCard';
-import { getIconName } from '../../constants/iconMappings';
-import { gradients, theme } from '../../constants/theme';
+import { SCHEDULE_MODES, ScheduleEditorSheet, ScheduleFormValues } from '../../components/ScheduleEditorSheet';
+import { theme } from '../../constants/theme';
 import { useGeyser } from '../../contexts/GeyserContext';
-import {
-  EVERY_DAY,
-  formatTime12,
-  getEndTime,
-  getScheduleIcon,
-  Schedule,
-  scheduleService,
-  to24Hour,
-} from '../../services/scheduleService';
+import { endsNextDay, formatDays, formatTime12, Schedule, scheduleService } from '../../services/scheduleService';
 
 /**
  * Schedules are saved to Firebase and run by the Cloud Function `runSchedules`,
  * so they work even when this phone is off.
  *
- * NOTE: This is the existing two-step UI, kept working on top of the new
- * cloud data. New schedules run every day and use the geyser's current mode.
- * The one-page design with days of the week and mode is coming in a later step.
+ * - Tap a schedule (or its pencil) to edit it in the sheet.
+ * - The power button turns a schedule on/off without deleting it.
+ * - The bin deletes it.
  */
 const SchedulingScreen = () => {
   const router = useRouter();
   const { device } = useGeyser();
 
-  // Modal states
-  const [showModal, setShowModal] = useState(false);
-  const [modalStep, setModalStep] = useState(1);
-  const [selectedHour, setSelectedHour] = useState(7);
-  const [selectedMinute, setSelectedMinute] = useState(0);
-  const [selectedPeriod, setSelectedPeriod] = useState('AM');
-  const [scheduleTemperature, setScheduleTemperature] = useState(40);
-  const [duration, setDuration] = useState(30); // minutes
-
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [online, setOnline] = useState(scheduleService.isOnline());
 
-  // Live schedule list (cached on the phone, kept in sync with Firebase)
+  // The sheet is open when `editor` is set: 'new' for a new schedule, or the schedule being edited.
+  const [editor, setEditor] = useState<'new' | Schedule | null>(null);
+
+  // Live schedule list (cached on the phone, kept in sync with Firebase).
+  // The service also notifies us when the connection goes up or down.
   useEffect(() => {
     return scheduleService.subscribe((list) => {
       setSchedules(list);
+      setOnline(scheduleService.isOnline());
       setIsLoading(false);
     });
   }, []);
 
-  const handleToggleSchedule = (scheduleId: string) => {
-    const schedule = schedules.find(s => s.id === scheduleId);
-    if (!schedule) return;
-    Alert.alert(
-      'Toggle Schedule',
-      'Enable/disable this schedule?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Toggle',
-          onPress: async () => {
-            try {
-              await scheduleService.setEnabled(scheduleId, !schedule.enabled);
-              Alert.alert('Success', 'Schedule updated!');
-            } catch (error) {
-              console.error('Error toggling schedule:', error);
-              Alert.alert('Error', 'Update failed');
-            }
-          }
-        },
-      ]
-    );
-  };
-
-  const handleDeleteSchedule = (scheduleId: string) => {
-    const schedule = schedules.find(s => s.id === scheduleId);
-    Alert.alert(
-      'Delete Schedule',
-      `Delete "${schedule?.name}"?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              // If it is running, the Cloud Function turns the geyser off on its next run.
-              await scheduleService.deleteSchedule(scheduleId);
-              Alert.alert('Success', 'Schedule deleted!');
-            } catch (error) {
-              console.error('Error deleting schedule:', error);
-              Alert.alert('Error', 'Delete failed');
-            }
-          }
-        },
-      ]
-    );
-  };
-
-  const handleCreateNewSchedule = () => {
+  const handleAdd = () => {
     if (!device) {
       Alert.alert('No device', 'Claim a geyser before creating schedules.');
       return;
     }
-    setSelectedHour(7);
-    setSelectedMinute(0);
-    setSelectedPeriod('AM');
-    setScheduleTemperature(45);
-    setDuration(30);
-    setModalStep(1);
-    setShowModal(true);
+    setEditor('new');
   };
 
-  const handleModalNext = async () => {
-    if (modalStep === 1) {
-      setModalStep(2);
-    } else if (modalStep === 2) {
-      if (scheduleTemperature < 30 || scheduleTemperature > 100) {
-        Alert.alert('Error', 'Temperature 30-100°C');
-        return;
+  const handleSave = async (values: ScheduleFormValues) => {
+    try {
+      if (editor && editor !== 'new') {
+        // Send only what changed. (Changing time or days lets the schedule run again today.)
+        const changes: Partial<ScheduleFormValues> = {};
+        if (values.startTime !== editor.startTime) changes.startTime = values.startTime;
+        if (values.endTime !== editor.endTime) changes.endTime = values.endTime;
+        if ([...values.days].sort().join() !== [...editor.days].sort().join()) changes.days = values.days;
+        if (values.temperature !== editor.temperature) changes.temperature = values.temperature;
+        if (values.mode !== editor.mode) changes.mode = values.mode;
+        if (Object.keys(changes).length > 0) await scheduleService.updateSchedule(editor.id, changes);
+      } else {
+        await scheduleService.createSchedule(values);
       }
-
-      try {
-        await scheduleService.createSchedule({
-          startTime: to24Hour(selectedHour, selectedMinute, selectedPeriod as 'AM' | 'PM'),
-          durationMinutes: duration,
-          temperature: scheduleTemperature,
-          mode: device?.mode ?? 'electric',
-          days: EVERY_DAY,
-        });
-        setShowModal(false);
-      } catch (error) {
-        console.error('Error creating schedule:', error);
-        Alert.alert('Error', 'Creation failed');
-        return;
-      }
-
-      Alert.alert(
-        'Success',
-        scheduleService.isOnline()
-          ? 'Schedule created!'
-          : 'Schedule saved on this phone. It will start working once you are back online.'
-      );
+      setEditor(null);
+    } catch (error) {
+      console.error('Error saving schedule:', error);
+      Alert.alert('Error', 'Could not save the schedule. Please try again.');
     }
   };
 
-  const handleModalBack = () => {
-    if (modalStep > 1) {
-      setModalStep(modalStep - 1);
-    } else {
-      setShowModal(false);
+  const handleToggle = async (schedule: Schedule) => {
+    try {
+      // If it is running, the Cloud Function turns the geyser off on its next run.
+      await scheduleService.setEnabled(schedule.id, !schedule.enabled);
+    } catch (error) {
+      console.error('Error toggling schedule:', error);
+      Alert.alert('Error', 'Update failed');
     }
   };
 
-  const renderTimePicker = () => {
-    const hours = Array.from({ length: 12 }, (_, i) => i + 1);
-    const minutes = Array.from({ length: 60 }, (_, i) => i);
-    const periods = ['AM', 'PM'];
-
-    return (
-      <View style={styles.timePickerContainer}>
-        {/* Hour Picker */}
-        <View style={styles.pickerColumn}>
-          <Text style={styles.pickerLabel}>Hour</Text>
-          <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
-            {hours.map((hour) => (
-              <Pressable
-                key={hour}
-                style={[
-                  styles.pickerItem,
-                  selectedHour === hour && styles.pickerItemSelected
-                ]}
-                onPress={() => setSelectedHour(hour)}
-              >
-                <Text style={[
-                  styles.pickerText,
-                  selectedHour === hour && styles.pickerTextSelected
-                ]}>
-                  {hour.toString().padStart(2, '0')}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-
-        {/* Minute Picker */}
-        <View style={styles.pickerColumn}>
-          <Text style={styles.pickerLabel}>Min</Text>
-          <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
-            {minutes.map((minute) => (
-              <Pressable
-                key={minute}
-                style={[
-                  styles.pickerItem,
-                  selectedMinute === minute && styles.pickerItemSelected
-                ]}
-                onPress={() => setSelectedMinute(minute)}
-              >
-                <Text style={[
-                  styles.pickerText,
-                  selectedMinute === minute && styles.pickerTextSelected
-                ]}>
-                  {minute.toString().padStart(2, '0')}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-
-        {/* Period Picker */}
-        <View style={styles.pickerColumn}>
-          <Text style={styles.pickerLabel}>Period</Text>
-          <ScrollView style={styles.picker} showsVerticalScrollIndicator={false}>
-            {periods.map((period) => (
-              <Pressable
-                key={period}
-                style={[
-                  styles.pickerItem,
-                  selectedPeriod === period && styles.pickerItemSelected
-                ]}
-                onPress={() => setSelectedPeriod(period)}
-              >
-                <Text style={[
-                  styles.pickerText,
-                  selectedPeriod === period && styles.pickerTextSelected
-                ]}>
-                  {period}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-      </View>
-    );
+  const handleDelete = (schedule: Schedule) => {
+    Alert.alert('Delete Schedule', `Delete "${schedule.name}"?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            // If it is running, the Cloud Function turns the geyser off on its next run.
+            await scheduleService.deleteSchedule(schedule.id);
+          } catch (error) {
+            console.error('Error deleting schedule:', error);
+            Alert.alert('Error', 'Delete failed');
+          }
+        },
+      },
+    ]);
   };
 
-  const renderTemperatureSlider = () => {
-    const temperatures = Array.from({ length: 8 }, (_, i) => 30 + (i * 10)); // 30-100°C in steps of 10
+  const renderSchedule = (schedule: Schedule) => {
+    const running = schedule.enabled && device?.activeScheduleId === schedule.id;
+    const disabled = !schedule.enabled;
+    const mode = SCHEDULE_MODES.find((m) => m.key === schedule.mode);
+    const muted = theme.colors.textMuted;
 
     return (
-      <View style={styles.temperatureContainer}>
-        <View style={styles.temperatureDisplay}>
-          <MaterialCommunityIcons name="thermometer" size={32} color={theme.colors.primary} />
-          <Text style={styles.temperatureValue}>{scheduleTemperature}°C</Text>
-        </View>
-        
-        <ScrollView 
-          horizontal 
-          style={styles.temperatureSlider} 
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.temperatureSliderContent}
-        >
-          {temperatures.map((temp) => (
-            <Pressable
-              key={temp}
-              style={[
-                styles.temperatureItem,
-                scheduleTemperature === temp && styles.temperatureItemSelected
-              ]}
-              onPress={() => setScheduleTemperature(temp)}
-            >
-              <View style={[
-                styles.temperatureDot,
-                scheduleTemperature === temp && styles.temperatureDotSelected
-              ]} />
-              <Text style={[
-                styles.temperatureText,
-                scheduleTemperature === temp && styles.temperatureTextSelected
-              ]}>
-                {temp}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      </View>
-    );
-  };
-
-  const renderDurationPicker = () => {
-    // Allow minute-level scheduling: 1, 5, 10, 15, 30 minutes, then hourly options
-    const durations = [1, 5, 10, 15, 30, 60, 120, 180, 240, 360]; // minutes
-
-    return (
-      <View style={styles.durationContainer}>
-        <View style={styles.durationDisplay}>
-          <MaterialCommunityIcons name="clock-time-four" size={32} color={theme.colors.primary} />
-          <Text style={styles.durationValue}>
-            {duration < 60 ? `${duration} min` : `${Math.floor(duration / 60)}h ${duration % 60 > 0 ? `${duration % 60}min` : ''}`}
+      <Pressable
+        key={schedule.id}
+        style={[styles.scheduleCard, running && styles.scheduleCardRunning, disabled && styles.scheduleCardDisabled]}
+        onPress={() => setEditor(schedule)}
+        accessibilityRole="button"
+        accessibilityLabel={`Edit ${schedule.name}`}
+      >
+        {/* Name + status */}
+        <View style={styles.cardTopRow}>
+          <Text style={[styles.scheduleName, disabled && { color: muted }]} numberOfLines={1}>
+            {schedule.name}
           </Text>
-        </View>
-        
-        <ScrollView 
-          horizontal 
-          style={styles.durationSlider} 
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.durationSliderContent}
-        >
-          {durations.map((minutes) => (
-            <Pressable
-              key={minutes}
-              style={[
-                styles.durationItem,
-                duration === minutes && styles.durationItemSelected
-              ]}
-              onPress={() => setDuration(minutes)}
-            >
-              <View style={[
-                styles.durationDot,
-                duration === minutes && styles.durationDotSelected
-              ]} />
-              <Text style={[
-                styles.durationText,
-                duration === minutes && styles.durationTextSelected
-              ]}>
-                {minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h`}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      </View>
-    );
-  };
-
-  const renderModalContent = () => {
-    switch (modalStep) {
-      case 1:
-        return (
-          <>
-            <Text style={styles.modalTitle}>Set Schedule Time</Text>
-            <Text style={styles.modalSubtitle}>Choose when you want the geyser to turn on</Text>
-            
-            <View style={styles.timeDisplayContainer}>
-              <MaterialCommunityIcons name="clock" size={24} color={theme.colors.primary} />
-              <Text style={styles.timeDisplay}>
-                {selectedHour.toString().padStart(2, '0')}:{selectedMinute.toString().padStart(2, '0')} {selectedPeriod}
-              </Text>
+          {running && (
+            <View style={styles.runningBadge}>
+              <View style={styles.runningDot} />
+              <Text style={styles.runningText}>Running now</Text>
             </View>
-            
-            {renderTimePicker()}
-          </>
-        );
-      case 2:
-        return (
-          <>
-            <Text style={styles.modalTitle}>Set Temperature</Text>
-            <Text style={styles.modalSubtitle}>Choose your target water temperature (30-100°C)</Text>
-            {renderTemperatureSlider()}
-            
-            {/* Removed maintainTempContainer */}
+          )}
+          {disabled && <Text style={styles.disabledText}>Disabled</Text>}
+        </View>
 
-            {renderDurationPicker()}
-          </>
-        );
-      default:
-        return null;
-    }
+        {/* Time */}
+        <Text style={[styles.scheduleTime, disabled && { color: muted }]}>
+          {formatTime12(schedule.startTime)} → {formatTime12(schedule.endTime)}
+          {endsNextDay(schedule.startTime, schedule.endTime) ? ' (next day)' : ''}
+        </Text>
+
+        {/* Days · temperature · mode */}
+        <View style={styles.detailsRow}>
+          <Text style={styles.detailsText}>
+            {formatDays(schedule.days)} · {schedule.temperature} °C ·{' '}
+          </Text>
+          {mode && (
+            <MaterialCommunityIcons name={mode.icon} size={14} color={disabled ? muted : mode.color} />
+          )}
+          <Text style={styles.detailsText}> {mode?.label ?? schedule.mode}</Text>
+        </View>
+
+        {/* Sync status + actions */}
+        <View style={styles.cardBottomRow}>
+          {schedule.synced ? (
+            <View style={styles.syncRow}>
+              <MaterialCommunityIcons name="cloud-check-outline" size={14} color={muted} />
+              <Text style={styles.syncText}>Synced</Text>
+            </View>
+          ) : (
+            <View style={styles.waitingBadge}>
+              <MaterialCommunityIcons name="timer-sand" size={13} color={theme.colors.warning} />
+              <Text style={styles.waitingText}>Waiting to sync</Text>
+            </View>
+          )}
+
+          <View style={styles.actions}>
+            <Pressable
+              style={styles.actionButton}
+              onPress={() => setEditor(schedule)}
+              accessibilityLabel={`Edit ${schedule.name}`}
+            >
+              <MaterialCommunityIcons name="pencil" size={18} color={theme.colors.secondary} />
+            </Pressable>
+            <Pressable
+              style={styles.actionButton}
+              onPress={() => handleToggle(schedule)}
+              accessibilityLabel={schedule.enabled ? `Disable ${schedule.name}` : `Enable ${schedule.name}`}
+            >
+              <MaterialCommunityIcons
+                name="power"
+                size={18}
+                color={schedule.enabled ? theme.colors.success : theme.colors.textMuted}
+              />
+            </Pressable>
+            <Pressable
+              style={styles.actionButton}
+              onPress={() => handleDelete(schedule)}
+              accessibilityLabel={`Delete ${schedule.name}`}
+            >
+              <MaterialCommunityIcons name="delete" size={18} color={theme.colors.error} />
+            </Pressable>
+          </View>
+        </View>
+      </Pressable>
+    );
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView showsVerticalScrollIndicator={false}>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <Pressable style={styles.backButton} onPress={() => router.back()}>
+            <Pressable style={styles.backButton} onPress={() => router.back()} accessibilityLabel="Back">
               <MaterialCommunityIcons name="arrow-left" size={24} color={theme.colors.text} />
             </Pressable>
             <Text style={styles.title}>Scheduling</Text>
@@ -373,33 +202,38 @@ const SchedulingScreen = () => {
           <MaterialCommunityIcons name="calendar-clock" size={24} color={theme.colors.primary} />
         </View>
 
-        {/* Schedule Stats */}
+        {/* Stats */}
         <View style={styles.statsRow}>
           <MetricCard
             title="Active Schedules"
-            value={schedules.filter(s => s.enabled).length.toString()}
+            value={schedules.filter((s) => s.enabled).length.toString()}
+            subtitle="Enabled"
             color={theme.colors.success}
-            icon={<MaterialCommunityIcons name="clock-check" size={20} color={theme.colors.success} />}
           />
           <MetricCard
             title="Total Schedules"
             value={schedules.length.toString()}
             subtitle="Created"
-            color={theme.colors.primary}
-            icon={<MaterialCommunityIcons name="calendar-clock" size={20} color={theme.colors.primary} />}
+            color={theme.colors.secondary}
           />
         </View>
 
+        {/* Offline banner */}
+        {!online && !isLoading && (
+          <View style={styles.offlineBanner}>
+            <MaterialCommunityIcons name="cloud-off-outline" size={18} color={theme.colors.warning} />
+            <Text style={styles.offlineText}>
+              You&apos;re offline. New schedules are saved on this phone and will sync when you&apos;re back online.
+            </Text>
+          </View>
+        )}
 
-
-
-
-        {/* Schedules List */}
+        {/* Schedules */}
         <DarkCard style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Your Schedules</Text>
-            <Pressable style={styles.addButton} onPress={handleCreateNewSchedule}>
-              <MaterialCommunityIcons name="plus" size={20} color={theme.colors.primary} />
+            <Pressable style={styles.addButton} onPress={handleAdd} accessibilityLabel="Add schedule">
+              <MaterialCommunityIcons name="plus" size={24} color={theme.colors.background} />
             </Pressable>
           </View>
 
@@ -409,108 +243,25 @@ const SchedulingScreen = () => {
               <Text style={styles.loadingText}>Loading schedules...</Text>
             </View>
           ) : schedules.length === 0 ? (
-            <View style={styles.emptyState}>
+            <Pressable style={styles.emptyState} onPress={handleAdd}>
               <MaterialCommunityIcons name="calendar-plus" size={48} color={theme.colors.textMuted} />
               <Text style={styles.emptyStateTitle}>No Schedules Yet</Text>
-              <Text style={styles.emptyStateDesc}>Create your first schedule to automate your geyser</Text>
-            </View>
+              <Text style={styles.emptyStateDesc}>Tap + to create your first schedule</Text>
+            </Pressable>
           ) : (
-            schedules.map((schedule) => (
-              <View key={schedule.id} style={styles.scheduleItem}>
-                <View style={styles.scheduleLeft}>
-                  <View style={[styles.scheduleIcon, { backgroundColor: schedule.enabled ? theme.colors.primary + '20' : theme.colors.surface }]}>
-                    <MaterialCommunityIcons 
-                      name={getIconName(getScheduleIcon(schedule.startTime))}
-                      size={24}
-                      color={schedule.enabled ? theme.colors.primary : theme.colors.textMuted}
-                    />
-                  </View>
-                  <View style={styles.scheduleInfo}>
-                    <Text style={[styles.scheduleName, { color: schedule.enabled ? theme.colors.text : theme.colors.textMuted }]}>
-                      {schedule.name}
-                    </Text>
-                    <View style={styles.scheduleTimeRow}>
-                      <MaterialCommunityIcons name="clock-start" size={16} color={theme.colors.primary} />
-                      <Text style={styles.scheduleTime}>{formatTime12(schedule.startTime)}</Text>
-                      <MaterialCommunityIcons name="clock-end" size={16} color={theme.colors.primary} />
-                      <Text style={styles.scheduleTime}>{formatTime12(getEndTime(schedule.startTime, schedule.durationMinutes))}</Text>
-                    </View>
-                    <View style={styles.scheduleDetails}>
-                      <Text style={styles.scheduleTemp}>{schedule.temperature}°C</Text>
-                      {device?.activeScheduleId === schedule.id && (
-                        <Text style={[styles.scheduleTemp, { color: theme.colors.success }]}>· Running now</Text>
-                      )}
-                      {!schedule.synced && (
-                        <Text style={[styles.scheduleTemp, { color: theme.colors.warning }]}>· Waiting to sync</Text>
-                      )}
-                    </View>
-                  </View>
-                </View>
-                <View style={styles.scheduleActions}>
-                  <Pressable 
-                    style={styles.actionButton}
-                    onPress={() => handleToggleSchedule(schedule.id)}
-                  >
-                    <MaterialCommunityIcons 
-                      name={schedule.enabled ? 'pause' : 'play'} 
-                      size={20} 
-                      color={schedule.enabled ? theme.colors.warning : theme.colors.success} 
-                    />
-                  </Pressable>
-                  <Pressable 
-                    style={styles.actionButton}
-                    onPress={() => handleDeleteSchedule(schedule.id)}
-                  >
-                    <MaterialCommunityIcons name="delete" size={20} color={theme.colors.error} />
-                  </Pressable>
-                </View>
-              </View>
-            ))
+            <View style={styles.list}>{schedules.map(renderSchedule)}</View>
           )}
         </DarkCard>
-
-        {/* Create Schedule Button */}
-        <View style={styles.buttonContainer}>
-          <GradientButton
-            title="Create New Schedule"
-            onPress={handleCreateNewSchedule}
-            colors={gradients.primary}
-            size="large"
-          />
-        </View>
       </ScrollView>
 
-      {/* Custom Modal */}
-      <Modal
-        visible={showModal}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setShowModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <DarkCard style={styles.modalCard}>
-            {renderModalContent()}
-            
-            <View style={styles.modalActions}>
-              <GradientButton
-                title={modalStep === 1 ? "Cancel" : "Back"}
-                onPress={handleModalBack}
-                colors={[theme.colors.surface, theme.colors.surface]}
-                size="medium"
-                textStyle={{ color: theme.colors.textSecondary }}
-                style={{ flex: 1, marginRight: theme.spacing.sm }}
-              />
-              <GradientButton
-                title={modalStep === 2 ? "Create Schedule" : "Next"}
-                onPress={handleModalNext}
-                colors={gradients.primary}
-                size="medium"
-                style={{ flex: 1, marginLeft: theme.spacing.sm }}
-              />
-            </View>
-          </DarkCard>
-        </View>
-      </Modal>
+      <ScheduleEditorSheet
+        visible={editor !== null}
+        initial={editor && editor !== 'new' ? editor : null}
+        onClose={() => setEditor(null)}
+        onSave={handleSave}
+        schedules={schedules}
+        defaultMode={device?.mode}
+      />
     </SafeAreaView>
   );
 };
@@ -518,23 +269,12 @@ const SchedulingScreen = () => {
 export default SchedulingScreen;
 
 const styles = StyleSheet.create({
-  loadingContainer: {
-    padding: theme.spacing.xl,
-    alignItems: 'center',
-  },
-  loadingText: {
-    marginTop: theme.spacing.md,
-    color: theme.colors.textSecondary,
-    fontSize: 14,
-  },
-
-  manualCheckContainer: {
-    paddingHorizontal: theme.spacing.lg,
-    marginBottom: theme.spacing.lg,
-  },
   container: {
     flex: 1,
     backgroundColor: theme.colors.background,
+  },
+  scrollContent: {
+    paddingBottom: 120, // clear the tab bar
   },
   header: {
     flexDirection: 'row',
@@ -562,15 +302,29 @@ const styles = StyleSheet.create({
     gap: theme.spacing.md,
     marginBottom: theme.spacing.lg,
   },
+
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: theme.spacing.sm,
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.lg,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.warning + '80',
+    backgroundColor: theme.colors.warning + '14',
+  },
+  offlineText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    color: theme.colors.warning,
+  },
+
   sectionCard: {
     marginHorizontal: theme.spacing.lg,
     marginBottom: theme.spacing.lg,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: theme.colors.text,
-    marginBottom: theme.spacing.md,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -578,13 +332,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: theme.spacing.md,
   },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: theme.colors.text,
+  },
   addButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: theme.colors.primary + '20',
+    width: 40,
+    height: 40,
+    borderRadius: theme.borderRadius.md,
+    backgroundColor: theme.colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  loadingContainer: {
+    padding: theme.spacing.xl,
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: theme.spacing.md,
+    color: theme.colors.textSecondary,
+    fontSize: 14,
   },
   emptyState: {
     alignItems: 'center',
@@ -601,373 +369,117 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: theme.colors.textSecondary,
     textAlign: 'center',
-    lineHeight: 20,
   },
-  settingItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: theme.spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.surface,
-  },
-  settingLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: theme.spacing.md,
-  },
-  settingText: {
-    flex: 1,
-  },
-  settingLabel: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: theme.colors.text,
-    marginBottom: 2,
-  },
-  settingDesc: {
-    fontSize: 12,
-    color: theme.colors.textSecondary,
-  },
-  scheduleItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: theme.spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.surface,
-  },
-  scheduleLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  scheduleIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: theme.spacing.md,
-  },
-  scheduleInfo: {
-    flex: 1,
-  },
-  scheduleName: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  scheduleTime: {
-    fontSize: 14,
-    color: theme.colors.primary,
-    fontWeight: '500',
-    marginBottom: theme.spacing.xs,
-  },
-  scheduleTimeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.xs,
-    marginBottom: theme.spacing.xs,
-  },
-  scheduleDetails: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.sm,
-  },
-  maintainTag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.xs,
-    backgroundColor: theme.colors.success + '20',
-    paddingHorizontal: theme.spacing.xs,
-    paddingVertical: 2,
-    borderRadius: theme.borderRadius.xs,
-  },
-  scheduleTemp: {
-    fontSize: 12,
-    color: theme.colors.textMuted,
-  },
-  maintainTempContainer: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.borderRadius.md,
-    padding: theme.spacing.md,
-    marginBottom: theme.spacing.xl,
-  },
-  maintainTempRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: theme.spacing.sm,
-  },
-  maintainTempText: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: '500',
-    color: theme.colors.text,
-    marginLeft: theme.spacing.md,
-  },
-  maintainTempDesc: {
-    fontSize: 12,
-    color: theme.colors.textSecondary,
-    lineHeight: 16,
-  },
-  durationContainer: {
-    alignItems: 'center',
-    marginBottom: theme.spacing.xl,
-  },
-  durationDisplay: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.primary + '20',
-    borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing.lg,
-    marginBottom: theme.spacing.xl,
+
+  list: {
     gap: theme.spacing.md,
   },
-  durationValue: {
-    fontSize: 24,
+  scheduleCard: {
+    backgroundColor: theme.colors.cardSecondary,
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border + '80',
+    padding: theme.spacing.md,
+  },
+  scheduleCardRunning: {
+    borderColor: theme.colors.primary,
+  },
+  scheduleCardDisabled: {
+    opacity: 0.6,
+  },
+  cardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing.sm,
+  },
+  scheduleName: {
+    flex: 1,
+    fontSize: 17,
     fontWeight: '700',
+    color: theme.colors.text,
+  },
+  runningBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.primary + '26',
+  },
+  runningDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: theme.colors.primary,
+  },
+  runningText: {
+    fontSize: 12,
+    fontWeight: '600',
     color: theme.colors.primary,
   },
-  durationSlider: {
-    height: 80,
-  },
-  durationSliderContent: {
-    paddingHorizontal: theme.spacing.lg,
-    alignItems: 'center',
-  },
-  durationItem: {
-    alignItems: 'center',
-    marginHorizontal: theme.spacing.xs,
-    paddingVertical: theme.spacing.sm,
-    minWidth: 40,
-  },
-  durationItemSelected: {
-    backgroundColor: theme.colors.primary + '20',
-    borderRadius: theme.borderRadius.md,
-  },
-  durationDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: theme.colors.textMuted,
-    marginBottom: theme.spacing.xs,
-  },
-  durationDotSelected: {
-    backgroundColor: theme.colors.primary,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-  },
-  durationText: {
+  disabledText: {
     fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.textMuted,
+  },
+  scheduleTime: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: theme.colors.text,
+    marginTop: theme.spacing.sm,
+  },
+  detailsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginTop: theme.spacing.xs,
+  },
+  detailsText: {
+    fontSize: 13,
     color: theme.colors.textSecondary,
   },
-  durationTextSelected: {
-    color: theme.colors.primary,
-    fontWeight: '600',
+  cardBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: theme.spacing.md,
   },
-  scheduleActions: {
+  syncRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  syncText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: theme.colors.textMuted,
+  },
+  waitingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: theme.borderRadius.sm,
+    backgroundColor: theme.colors.warning + '26',
+  },
+  waitingText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.colors.warning,
+  },
+  actions: {
     flexDirection: 'row',
     gap: theme.spacing.sm,
   },
   actionButton: {
     width: 36,
     height: 36,
-    borderRadius: 18,
-    backgroundColor: theme.colors.surface,
+    borderRadius: theme.borderRadius.sm,
+    backgroundColor: theme.colors.card,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  quickActions: {
-    flexDirection: 'row',
-    gap: theme.spacing.md,
-  },
-  quickActionButton: {
-    flex: 1,
-    alignItems: 'center',
-    padding: theme.spacing.md,
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.borderRadius.md,
-    gap: theme.spacing.xs,
-  },
-  quickActionText: {
-    fontSize: 12,
-    color: theme.colors.text,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-  buttonContainer: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingBottom: 120, // Extra padding to clear the navbar
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: theme.spacing.lg,
-  },
-  modalCard: {
-    width: '100%',
-    maxWidth: 400,
-    padding: theme.spacing.xl,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: theme.colors.text,
-    textAlign: 'center',
-    marginBottom: theme.spacing.sm,
-  },
-  modalSubtitle: {
-    fontSize: 14,
-    color: theme.colors.textSecondary,
-    textAlign: 'center',
-    marginBottom: theme.spacing.xl,
-    lineHeight: 20,
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.borderRadius.md,
-    paddingHorizontal: theme.spacing.md,
-    marginBottom: theme.spacing.xl,
-    borderWidth: 1,
-    borderColor: theme.colors.primary + '20',
-  },
-  textInput: {
-    flex: 1,
-    paddingVertical: theme.spacing.md,
-    paddingHorizontal: theme.spacing.sm,
-    fontSize: 16,
-    color: theme.colors.text,
-  },
-  unitText: {
-    fontSize: 16,
-    color: theme.colors.textMuted,
-    fontWeight: '500',
-  },
-  modalActions: {
-    flexDirection: 'row',
-    gap: theme.spacing.sm,
-  },
-  timeDisplayContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: theme.colors.primary + '20',
-    borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing.lg,
-    marginBottom: theme.spacing.xl,
-    gap: theme.spacing.md,
-  },
-  timeDisplay: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: theme.colors.primary,
-  },
-  timePickerContainer: {
-    flexDirection: 'row',
-    gap: theme.spacing.md,
-    marginBottom: theme.spacing.xl,
-  },
-  pickerColumn: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  pickerLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: theme.colors.text,
-    marginBottom: theme.spacing.sm,
-  },
-  picker: {
-    height: 180,
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.borderRadius.md,
-    width: '100%',
-  },
-  pickerItem: {
-    paddingVertical: theme.spacing.xs,
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 40,
-  },
-  pickerItemSelected: {
-    backgroundColor: theme.colors.primary + '20',
-  },
-  pickerText: {
-    fontSize: 16,
-    color: theme.colors.textSecondary,
-  },
-  pickerTextSelected: {
-    color: theme.colors.primary,
-    fontWeight: '600',
-  },
-  temperatureContainer: {
-    alignItems: 'center',
-    marginBottom: theme.spacing.xl,
-  },
-  temperatureDisplay: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: theme.colors.primary + '20',
-    borderRadius: theme.borderRadius.lg,
-    padding: theme.spacing.lg,
-    marginBottom: theme.spacing.xl,
-    gap: theme.spacing.md,
-  },
-  temperatureValue: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: theme.colors.primary,
-  },
-  temperatureSlider: {
-    height: 80,
-  },
-  temperatureSliderContent: {
-    paddingHorizontal: theme.spacing.lg,
-    alignItems: 'center',
-  },
-  temperatureItem: {
-    alignItems: 'center',
-    marginHorizontal: theme.spacing.xs,
-    paddingVertical: theme.spacing.sm,
-    minWidth: 40,
-  },
-  temperatureItemSelected: {
-    backgroundColor: theme.colors.primary + '20',
-    borderRadius: theme.borderRadius.md,
-  },
-  temperatureDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: theme.colors.textMuted,
-    marginBottom: theme.spacing.xs,
-  },
-  temperatureDotSelected: {
-    backgroundColor: theme.colors.primary,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-  },
-  temperatureText: {
-    fontSize: 12,
-    color: theme.colors.textSecondary,
-  },
-  temperatureTextSelected: {
-    color: theme.colors.primary,
-    fontWeight: '600',
   },
 });
