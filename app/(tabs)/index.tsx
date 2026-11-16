@@ -22,7 +22,8 @@ import { MetricCard } from '../../components/MetricCard';
 import { ProfileAvatar } from '../../components/ProfileAvatar';
 import { getIconName } from '../../constants/iconMappings';
 import { theme } from '../../constants/theme';
-// Temporarily using Mock Auth for testing - switch back to AuthContext when Firebase is configured
+import { scheduleService } from '../../services/scheduleService';
+import { usageService } from '../../services/usageService';
 
 // Quick Actions List
 const quickActions = [
@@ -136,8 +137,7 @@ export default function Index() {
   useEffect(() => {
     const loadUsageData = async () => {
       try {
-        const { scheduleService } = await import('../../services/scheduleService');
-        const usage = await scheduleService.getUsageTracking();
+        const usage = await usageService.getUsageTracking();
         setGeyserUsageTime(usage.totalTime);
       } catch (error) {
         console.error('Error loading usage data:', error);
@@ -161,11 +161,10 @@ export default function Index() {
       // Update usage tracking when geyser is on
       if (isGeyserOn) {
         try {
-          const { scheduleService } = await import('../../services/scheduleService');
-          await scheduleService.updateUsageTracking(0.083); // Add 5 minutes
-          
+          await usageService.updateUsageTracking(0.083); // Add 5 minutes
+
           // Refresh usage display
-          const usage = await scheduleService.getUsageTracking();
+          const usage = await usageService.getUsageTracking();
           setGeyserUsageTime(usage.totalTime);
         } catch (error) {
           console.error('Error updating usage tracking:', error);
@@ -182,27 +181,11 @@ export default function Index() {
     return () => clearInterval(interval);
   }, [device, isGeyserOn]);
 
-  // Load active schedules count
+  // Active schedules count, live from Firebase (via scheduleService)
   useEffect(() => {
-    const loadActiveSchedules = async () => {
-      try {
-        // Import schedule service dynamically to avoid circular dependencies
-        const { scheduleService } = await import('../../services/scheduleService');
-        const schedules = await scheduleService.getSchedules();
-        const activeCount = schedules.filter(s => s.enabled).length;
-        setActiveSchedulesCount(activeCount);
-      } catch (error) {
-        console.error('Error loading active schedules:', error);
-        setActiveSchedulesCount(0);
-      }
-    };
-
-    loadActiveSchedules();
-    
-    // Refresh every minute
-    const interval = setInterval(loadActiveSchedules, 60 * 1000);
-    
-    return () => clearInterval(interval);
+    return scheduleService.subscribe((schedules) => {
+      setActiveSchedulesCount(schedules.filter((s) => s.enabled).length);
+    });
   }, []);
 
   return (

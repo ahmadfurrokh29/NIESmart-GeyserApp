@@ -9,18 +9,28 @@ import { MetricCard } from '../../components/MetricCard';
 import { getIconName } from '../../constants/iconMappings';
 import { gradients, theme } from '../../constants/theme';
 import { useGeyser } from '../../contexts/GeyserContext';
-import { geyserControlService } from '../../services/geyserControlService';
-import { ActiveSchedule, Schedule, scheduleService } from '../../services/scheduleService';
+import {
+  EVERY_DAY,
+  formatTime12,
+  getEndTime,
+  getScheduleIcon,
+  Schedule,
+  scheduleService,
+  to24Hour,
+} from '../../services/scheduleService';
 
+/**
+ * Schedules are saved to Firebase and run by the Cloud Function `runSchedules`,
+ * so they work even when this phone is off.
+ *
+ * NOTE: This is the existing two-step UI, kept working on top of the new
+ * cloud data. New schedules run every day and use the geyser's current mode.
+ * The one-page design with days of the week and mode is coming in a later step.
+ */
 const SchedulingScreen = () => {
   const router = useRouter();
-  const geyserCtx = useGeyser();
+  const { device } = useGeyser();
 
-  // Initialize geyser control service
-  useEffect(() => {
-    geyserControlService.setContext(geyserCtx);
-  }, [geyserCtx]);
-  
   // Modal states
   const [showModal, setShowModal] = useState(false);
   const [modalStep, setModalStep] = useState(1);
@@ -28,68 +38,32 @@ const SchedulingScreen = () => {
   const [selectedMinute, setSelectedMinute] = useState(0);
   const [selectedPeriod, setSelectedPeriod] = useState('AM');
   const [scheduleTemperature, setScheduleTemperature] = useState(40);
-  const [duration, setDuration] = useState(1); // Duration in minutes (changed from hours)
-  // Removed maintainTemp state
+  const [duration, setDuration] = useState(30); // minutes
 
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [activeSchedule, setActiveSchedule] = useState<ActiveSchedule | null>(null);
 
-  // Load schedules when component mounts
+  // Live schedule list (cached on the phone, kept in sync with Firebase)
   useEffect(() => {
-    loadSchedules();
-    initializeScheduleService();
-    loadActiveSchedule();
+    return scheduleService.subscribe((list) => {
+      setSchedules(list);
+      setIsLoading(false);
+    });
   }, []);
 
-  // Load active schedule
-  const loadActiveSchedule = async () => {
-    try {
-      const currentActive = await scheduleService.getCurrentActiveSchedule();
-      setActiveSchedule(currentActive);
-    } catch (error) {
-      console.error('Error loading active schedule:', error);
-    }
-  };
-
-  const loadSchedules = async () => {
-    try {
-      setIsLoading(true);
-      const savedSchedules = await scheduleService.getSchedules();
-      setSchedules(savedSchedules);
-    } catch (error) {
-      console.error('Error loading schedules:', error);
-              Alert.alert('Error', 'Failed to load');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const initializeScheduleService = async () => {
-    try {
-      await scheduleService.initializeBackgroundTask();
-    } catch (error) {
-      console.error('Error initializing schedule service:', error);
-    }
-  };
-
-  const handleToggleSchedule = (scheduleId: number) => {
+  const handleToggleSchedule = (scheduleId: string) => {
+    const schedule = schedules.find(s => s.id === scheduleId);
+    if (!schedule) return;
     Alert.alert(
       'Toggle Schedule',
       'Enable/disable this schedule?',
       [
         { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Toggle', 
+        {
+          text: 'Toggle',
           onPress: async () => {
             try {
-              const updatedSchedules = schedules.map(schedule => 
-                schedule.id === scheduleId 
-                  ? { ...schedule, enabled: !schedule.enabled }
-                  : schedule
-              );
-              await scheduleService.saveSchedules(updatedSchedules);
-              setSchedules(updatedSchedules);
+              await scheduleService.setEnabled(scheduleId, !schedule.enabled);
               Alert.alert('Success', 'Schedule updated!');
             } catch (error) {
               console.error('Error toggling schedule:', error);
@@ -101,28 +75,20 @@ const SchedulingScreen = () => {
     );
   };
 
-  const handleDeleteSchedule = (scheduleId: number) => {
+  const handleDeleteSchedule = (scheduleId: string) => {
     const schedule = schedules.find(s => s.id === scheduleId);
     Alert.alert(
       'Delete Schedule',
       `Delete "${schedule?.name}"?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Delete', 
-          style: 'destructive', 
+        {
+          text: 'Delete',
+          style: 'destructive',
           onPress: async () => {
             try {
-              const updatedSchedules = schedules.filter(s => s.id !== scheduleId);
-              await scheduleService.saveSchedules(updatedSchedules);
-              setSchedules(updatedSchedules);
-              
-              // Check if the deleted schedule was active and clear it
-              if (activeSchedule && activeSchedule.scheduleId === scheduleId) {
-                await scheduleService.clearActiveSchedule();
-                setActiveSchedule(null);
-              }
-              
+              // If it is running, the Cloud Function turns the geyser off on its next run.
+              await scheduleService.deleteSchedule(scheduleId);
               Alert.alert('Success', 'Schedule deleted!');
             } catch (error) {
               console.error('Error deleting schedule:', error);
@@ -135,23 +101,17 @@ const SchedulingScreen = () => {
   };
 
   const handleCreateNewSchedule = () => {
+    if (!device) {
+      Alert.alert('No device', 'Claim a geyser before creating schedules.');
+      return;
+    }
     setSelectedHour(7);
     setSelectedMinute(0);
     setSelectedPeriod('AM');
     setScheduleTemperature(45);
+    setDuration(30);
     setModalStep(1);
     setShowModal(true);
-  };
-
-  const handleManualCheck = async () => {
-    try {
-      await scheduleService.forceCheckSchedules();
-      await loadActiveSchedule(); // Refresh active schedule
-      Alert.alert('Success', 'Check complete!');
-    } catch (error) {
-      console.error('Error in manual check:', error);
-      Alert.alert('Error', 'Check failed');
-    }
   };
 
   const handleModalNext = async () => {
@@ -162,48 +122,28 @@ const SchedulingScreen = () => {
         Alert.alert('Error', 'Temperature 30-100°C');
         return;
       }
-      
-      // Format time
-      const formattedTime = `${selectedHour.toString().padStart(2, '0')}:${selectedMinute.toString().padStart(2, '0')} ${selectedPeriod}`;
-      
-      // Calculate end time based on duration
-      const startDate = new Date();
-      startDate.setHours(selectedPeriod === 'PM' && selectedHour !== 12 ? selectedHour + 12 : selectedHour);
-      startDate.setMinutes(selectedMinute);
-      const endDate = new Date(startDate.getTime() + (duration * 60 * 1000));
-      const endHour = endDate.getHours();
-      const endMinute = endDate.getMinutes();
-      const endPeriod = endHour >= 12 ? 'PM' : 'AM';
-      const formattedEndTime = `${(endHour % 12 || 12).toString().padStart(2, '0')}:${endMinute.toString().padStart(2, '0')} ${endPeriod}`;
-      
-      // Generate sequential schedule name
-      const scheduleNumber = schedules.length + 1;
-      const autoName = `Schedule ${scheduleNumber}`;
-      
+
       try {
-        const newSchedule: Schedule = {
-          id: Date.now(),
-          name: autoName,
-          time: formattedTime,
-          endTime: formattedEndTime,
+        await scheduleService.createSchedule({
+          startTime: to24Hour(selectedHour, selectedMinute, selectedPeriod as 'AM' | 'PM'),
+          durationMinutes: duration,
           temperature: scheduleTemperature,
-          duration: duration,
-          enabled: true,
-          icon: selectedPeriod === 'AM' && selectedHour < 12 ? 'weather-sunny' : 
-                selectedPeriod === 'PM' && selectedHour >= 6 ? 'weather-night' : 'weather-partly-cloudy'
-        };
-        
-        const updatedSchedules = [...schedules, newSchedule];
-        await scheduleService.saveSchedules(updatedSchedules);
-        setSchedules(updatedSchedules);
+          mode: device?.mode ?? 'electric',
+          days: EVERY_DAY,
+        });
         setShowModal(false);
       } catch (error) {
         console.error('Error creating schedule:', error);
         Alert.alert('Error', 'Creation failed');
         return;
       }
-      
-      Alert.alert('Success', 'Schedule created!');
+
+      Alert.alert(
+        'Success',
+        scheduleService.isOnline()
+          ? 'Schedule created!'
+          : 'Schedule saved on this phone. It will start working once you are back online.'
+      );
     }
   };
 
@@ -480,9 +420,9 @@ const SchedulingScreen = () => {
                 <View style={styles.scheduleLeft}>
                   <View style={[styles.scheduleIcon, { backgroundColor: schedule.enabled ? theme.colors.primary + '20' : theme.colors.surface }]}>
                     <MaterialCommunityIcons 
-                      name={getIconName(schedule.icon)} 
-                      size={24} 
-                      color={schedule.enabled ? theme.colors.primary : theme.colors.textMuted} 
+                      name={getIconName(getScheduleIcon(schedule.startTime))}
+                      size={24}
+                      color={schedule.enabled ? theme.colors.primary : theme.colors.textMuted}
                     />
                   </View>
                   <View style={styles.scheduleInfo}>
@@ -491,13 +431,18 @@ const SchedulingScreen = () => {
                     </Text>
                     <View style={styles.scheduleTimeRow}>
                       <MaterialCommunityIcons name="clock-start" size={16} color={theme.colors.primary} />
-                      <Text style={styles.scheduleTime}>{schedule.time}</Text>
+                      <Text style={styles.scheduleTime}>{formatTime12(schedule.startTime)}</Text>
                       <MaterialCommunityIcons name="clock-end" size={16} color={theme.colors.primary} />
-                      <Text style={styles.scheduleTime}>{schedule.endTime}</Text>
+                      <Text style={styles.scheduleTime}>{formatTime12(getEndTime(schedule.startTime, schedule.durationMinutes))}</Text>
                     </View>
                     <View style={styles.scheduleDetails}>
                       <Text style={styles.scheduleTemp}>{schedule.temperature}°C</Text>
-                      {/* Removed maintainTag */}
+                      {device?.activeScheduleId === schedule.id && (
+                        <Text style={[styles.scheduleTemp, { color: theme.colors.success }]}>· Running now</Text>
+                      )}
+                      {!schedule.synced && (
+                        <Text style={[styles.scheduleTemp, { color: theme.colors.warning }]}>· Waiting to sync</Text>
+                      )}
                     </View>
                   </View>
                 </View>

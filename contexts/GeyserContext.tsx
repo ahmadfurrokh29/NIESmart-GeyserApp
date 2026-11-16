@@ -7,6 +7,7 @@ import {
 } from 'firebase/database';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { database } from '../config/firebase';
+import { scheduleService } from '../services/scheduleService';
 import { useAuth } from './AuthContext';
 
 export interface DeviceData {
@@ -15,6 +16,8 @@ export interface DeviceData {
   mode: 'electric' | 'gas' | 'hybrid';
   isOn?: boolean;
   userId?: string;
+  /** Set by the Cloud Function while a schedule is running the geyser. */
+  activeScheduleId?: string | null;
 }
 
 interface GeyserContextType {
@@ -103,6 +106,7 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
      });
 
     if (!user) {
+      scheduleService.stop();
       setDevice(null);
       setLoading(false);
       return;
@@ -114,25 +118,15 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const claimedDeviceId = user.claimedDeviceId || user.deviceId;
     console.log('GeyserContext - Claimed device ID:', claimedDeviceId);
     
-    // Set device ID in geyser control service for background operations
+    // Keep this device's schedules in sync with Firebase (cloud scheduling).
     if (claimedDeviceId) {
-      // Use IIFE to handle async operations
-      (async () => {
-        try {
-          const { geyserControlService } = await import('../services/geyserControlService');
-          geyserControlService.setDeviceId(claimedDeviceId);
-          
-          // Also store device ID in AsyncStorage for background access
-          const AsyncStorage = await import('@react-native-async-storage/async-storage');
-          await AsyncStorage.default.setItem('@device_id', claimedDeviceId);
-          
-          console.log('GeyserContext - Device ID set in control service and storage');
-        } catch (error) {
-          console.error('GeyserContext - Error setting device ID in control service:', error);
-        }
-      })();
+      scheduleService.start(claimedDeviceId).catch((error) =>
+        console.error('GeyserContext - Error starting schedule sync:', error),
+      );
+    } else {
+      scheduleService.stop();
     }
-    
+
     if (claimedDeviceId) {
       const deviceRef = ref(database, `DEVICES/${claimedDeviceId}`);
       const deviceUnsubscribe = onValue(deviceRef, (snapshot) => {
@@ -212,7 +206,10 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const deviceRef = ref(database, `DEVICES/${claimedDeviceId}`);
     await update(deviceRef, {
-      isOn: isOn
+      isOn: isOn,
+      // A manual on/off overrides any running schedule, so the Cloud Function
+      // won't switch the geyser off (or back on) for that schedule.
+      activeScheduleId: null,
     });
   };
 
@@ -293,20 +290,6 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       update(deviceRef, { userId: userId })
     ]);
 
-    // Set device ID in geyser control service for background operations
-    try {
-      const { geyserControlService } = await import('../services/geyserControlService');
-      geyserControlService.setDeviceId(deviceId);
-      
-      // Also store device ID in AsyncStorage for background access
-      const AsyncStorage = await import('@react-native-async-storage/async-storage');
-      await AsyncStorage.default.setItem('@device_id', deviceId);
-      
-      console.log('GeyserContext - Device ID set in control service and storage');
-    } catch (error) {
-      console.error('GeyserContext - Error setting device ID in control service:', error);
-    }
-
     console.log('GeyserContext - claimDevice completed successfully');
   };
 
@@ -323,11 +306,20 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const claimedDeviceId = user.claimedDeviceId || user.deviceId;
     if (!claimedDeviceId) throw new Error('No device claimed by this user');
 
-    // Perform all updates in parallel
-    await Promise.all([
-      update(ref(database, `DEVICES/${claimedDeviceId}`), { userId: null }),
-      update(ref(database, `users/${userId}`), { claimedDeviceId: null })
-    ]);
+    // Unlink both sides and stop any running schedule, in one atomic update.
+    await update(ref(database), {
+      [`DEVICES/${claimedDeviceId}/userId`]: null,
+      [`DEVICES/${claimedDeviceId}/activeScheduleId`]: null,
+      [`users/${userId}/claimedDeviceId`]: null,
+    });
+
+    // The geyser's schedules belong to this owner, so remove them too
+    // (in Firebase and on this phone); the next owner starts fresh.
+    try {
+      await scheduleService.deleteAllForDevice(claimedDeviceId);
+    } catch (error) {
+      console.error('GeyserContext - Error removing schedules on unclaim:', error);
+    }
   };
 
   const normalizeDatabaseMode = async (): Promise<void> => {

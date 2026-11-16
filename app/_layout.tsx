@@ -1,6 +1,7 @@
 import { Stack, useRouter } from "expo-router";
 import * as SplashScreenLib from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import * as TaskManager from 'expo-task-manager';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Text, View } from 'react-native';
 import SplashScreen from '../components/SplashScreen';
@@ -19,20 +20,13 @@ function RootLayoutNav() {
   const [initialLoad, setInitialLoad] = useState(true);
   const [showSplash, setShowSplash] = useState(true);
 
-  // Initialize background scheduling system
+  // Schedules now run in the cloud (Firebase Cloud Function `runSchedules`).
+  // Remove background tasks that older versions of the app registered on
+  // this phone, so the OS stops waking the app up for them.
   useEffect(() => {
-    const initializeBackgroundServices = async () => {
-      try {
-        // Initialize schedule service for background execution
-        const { scheduleService } = await import('../services/scheduleService');
-        await scheduleService.initialize();
-        console.log('Background scheduling system initialized');
-      } catch (error) {
-        console.error('Error initializing background services:', error);
-      }
-    };
-
-    initializeBackgroundServices();
+    TaskManager.unregisterAllTasksAsync().catch(() => {
+      // Not supported in some environments (e.g. web); nothing to clean up there.
+    });
   }, []);
 
   // 1. Effect for splash screen
