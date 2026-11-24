@@ -14,6 +14,7 @@ import { CustomAlert, showConfirm, showError } from '../../components/CustomAler
 import { DarkCard } from '../../components/DarkCard';
 import { ProfileAvatar } from '../../components/ProfileAvatar';
 import { theme } from '../../constants/theme';
+import { scheduleService } from '../../services/scheduleService';
 import { useAuth } from '../../contexts/AuthContext';
 
 const ACCOUNT_SETTINGS = [
@@ -39,7 +40,12 @@ const SettingsScreen = () => {
 
   const handlePress = (key: string) => {
     if (key === 'logout') {
-      setAlertConfig(showConfirm('Logout', 'Logout?', async () => {
+      const pending = scheduleService.getPendingCount();
+      const message =
+        pending > 0
+          ? `${pending} schedule change${pending > 1 ? 's have' : ' has'} not synced yet (no internet). Logging out will discard ${pending > 1 ? 'them' : 'it'}. Logout anyway?`
+          : 'Logout?';
+      setAlertConfig(showConfirm('Logout', message, async () => {
         try {
           await logout();
           // Ensure we return to auth screens explicitly

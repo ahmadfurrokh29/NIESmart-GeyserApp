@@ -1,5 +1,5 @@
 import { useAuth } from "@/contexts/AuthContext";
-import { useGeyser } from "@/contexts/GeyserContext";
+import { isOfflineError, useGeyser } from "@/contexts/GeyserContext";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
@@ -49,7 +49,7 @@ function getTemperatureImage(temp: number) {
 export default function Index() {
   const router = useRouter();
   const { user } = useAuth();
-  const { device, updateDeviceSettings, updateGeyserOnOff, claimDevice } = useGeyser();
+  const { device, isOnline, updateDeviceSettings, updateGeyserOnOff, claimDevice } = useGeyser();
   const [energyUsage, setEnergyUsage] = useState(0); // kWh today - will be calculated
   const [geyserUsageTime, setGeyserUsageTime] = useState(0); // Hours today - will be calculated
   const [lastUpdated, setLastUpdated] = useState(new Date());
@@ -80,6 +80,9 @@ export default function Index() {
 
   // Get real device data from Firebase
   const isGeyserOn = device?.isOn ?? false;
+  // Reported by the hardware: is the geyser really heating right now?
+  const isHeatingNow = device?.Geyser_state === true;
+  const currentMode = normalizeMode(device?.mode ?? '');
   const temperature = device ? parseInt(device.current_Temp) : 25;
   const targetTemperature = device?.target_Temp ?? 40;
   const deviceMode = device?.mode ? normalizeMode(device.mode) : 'electric';
@@ -244,12 +247,20 @@ export default function Index() {
             <View style={styles.statusOverlay}>
               <View style={styles.statusHeader}>
                 <Text style={styles.statusTitle}>Geyser Status</Text>
-                <View style={styles.onlineIndicator}>
-                  <View style={[styles.onlineDot, { backgroundColor: isGeyserOn ? theme.colors.success : theme.colors.error }]} />
-                  <Text style={[styles.onlineText, { color: isGeyserOn ? theme.colors.success : theme.colors.error }]}>
-                    {isGeyserOn ? 'Online' : 'Offline'}
-                  </Text>
-                </View>
+                {/* Offline: no icons at all, since the geyser data may be out of date. */}
+                {isOnline && (
+                  <View style={styles.statusIcons}>
+                    {/* Mode icon(s): only while the hardware says the geyser is really heating. */}
+                    {isHeatingNow && (currentMode === 'gas' || currentMode === 'hybrid') && (
+                      <MaterialCommunityIcons name="fire" size={20} color={theme.colors.accent} accessibilityLabel="Heating with gas" />
+                    )}
+                    {isHeatingNow && (currentMode === 'electric' || currentMode === 'hybrid') && (
+                      <MaterialCommunityIcons name="flash" size={20} color={theme.colors.warning} accessibilityLabel="Heating with electricity" />
+                    )}
+                    {/* Wi-Fi: this phone is connected to the internet. */}
+                    <MaterialCommunityIcons name="wifi" size={20} color={theme.colors.success} accessibilityLabel="Phone is online" />
+                  </View>
+                )}
               </View>
 
               <View style={styles.temperatureDisplay}>
@@ -277,6 +288,7 @@ export default function Index() {
                       try {
                         await updateGeyserOnOff(value);
                       } catch (error) {
+                        if (isOfflineError(error)) return; // the "No internet" popup is already shown
                         console.error('Error updating geyser state:', error);
                         setAlertConfig(showError('Error', 'Update failed'));
                       }
@@ -439,21 +451,14 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: theme.colors.text,
   },
-  onlineIndicator: {
+  statusIcons: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.xs,
-  },
-  onlineDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: theme.colors.success,
-  },
-  onlineText: {
-    fontSize: 14,
-    color: theme.colors.success,
-    fontWeight: '500',
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 4,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: 'rgba(0,0,0,0.25)', // keeps the icons readable on the photo background
   },
   temperatureDisplay: {
     alignItems: 'center',

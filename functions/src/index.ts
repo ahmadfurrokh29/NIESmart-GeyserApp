@@ -12,7 +12,7 @@ import { initializeApp } from 'firebase-admin/app';
 import { getDatabase } from 'firebase-admin/database';
 import { logger } from 'firebase-functions';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
-import { DEFAULT_TIMEZONE, planDevice, Schedule } from './scheduleLogic';
+import { DEFAULT_TIMEZONE, DeviceScheduleState, planDevice, Schedule } from './scheduleLogic';
 
 initializeApp();
 
@@ -41,20 +41,19 @@ export const runSchedules = onSchedule(
 
     await Promise.all(
       Object.entries(allSchedules).map(async ([deviceId, schedules]) => {
-        // Read only the two small fields we need, not the whole device.
-        const [ownerSnap, activeSnap] = await Promise.all([
-          db.ref(`DEVICES/${deviceId}/userId`).get(),
-          db.ref(`DEVICES/${deviceId}/activeScheduleId`).get(),
-        ]);
+        // The device record is small: isOn, target_Temp, mode, current_Temp, userId, ...
+        const device = (await db.ref(`DEVICES/${deviceId}`).get()).val() as
+          | (DeviceScheduleState & { userId?: string })
+          | null;
 
         // Skip schedules of devices that don't exist or have no owner,
         // so we never create a fake device entry by writing to it.
-        if (!ownerSnap.exists()) {
+        if (!device?.userId) {
           logger.debug(`Skipping ${deviceId}: device missing or unclaimed`);
           return;
         }
 
-        const plan = planDevice(schedules, { activeScheduleId: activeSnap.val() }, now);
+        const plan = planDevice(schedules, device, now);
 
         for (const [field, value] of Object.entries(plan.deviceUpdates)) {
           updates[`DEVICES/${deviceId}/${field}`] = value;

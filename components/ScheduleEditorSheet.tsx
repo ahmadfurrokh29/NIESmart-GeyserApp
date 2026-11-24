@@ -30,7 +30,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { gradients, theme } from "../constants/theme";
 import {
   endsNextDay,
-  EVERY_DAY,
   findOverlap,
   formatTime12,
   getWindowMinutes,
@@ -105,7 +104,7 @@ export function ScheduleEditorSheet({
   const insets = useSafeAreaInsets();
   const [startTime, setStartTime] = useState("07:00");
   const [endTime, setEndTime] = useState("07:30");
-  const [days, setDays] = useState<number[]>(EVERY_DAY);
+  const [days, setDays] = useState<number[]>([]);
   const [temperature, setTemperature] = useState(50);
   const [mode, setMode] = useState<ScheduleMode>(defaultMode);
   const [picking, setPicking] = useState<"start" | "end" | null>(null);
@@ -149,7 +148,7 @@ export function ScheduleEditorSheet({
     if (!visible) return;
     setStartTime(initial?.startTime ?? "07:00");
     setEndTime(initial?.endTime ?? "07:30");
-    setDays(initial?.days ?? EVERY_DAY);
+    setDays(initial?.days ?? []); // new schedules start with no days: the user picks them
     setTemperature(initial?.temperature ?? 50);
     setMode(initial?.mode ?? defaultMode);
     setPicking(null);
@@ -312,8 +311,8 @@ export function ScheduleEditorSheet({
               })}
             </View>
             {noDays && (
-              <Text style={[styles.hint, { color: theme.colors.error }]}>
-                Select at least one day.
+              <Text style={styles.hint}>
+                Select the days this schedule repeats on.
               </Text>
             )}
 

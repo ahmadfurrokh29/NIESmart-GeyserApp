@@ -24,9 +24,15 @@
  *      returns to A's temperature and mode until 8:00). If several are
  *      still open, the one that started most recently is used. If none is
  *      open, the geyser is turned off.
- *   5. The app clears `activeScheduleId` when the user switches the geyser
- *      on or off by hand, so a manual choice is never overridden: no
- *      switching back and no turning off until the next schedule starts.
+ *   5. Before the first schedule takes control, the geyser's own settings
+ *      (isOn, target_Temp, mode) are saved in DEVICES/{id}/beforeSchedule.
+ *      When no schedule is open any more, they are RESTORED: e.g. geyser on
+ *      by hand at 40 °C, schedule 7:00-7:30 at 60 °C, at 7:30 it goes back
+ *      to 40 °C and stays on. If it was off before, it is turned off.
+ *   6. When the user changes on/off, temperature or mode by hand, the app
+ *      clears `activeScheduleId` and `beforeSchedule`: the running schedule
+ *      stops controlling the geyser for today (it still runs on its next
+ *      day), nothing is restored, and the manual choice is never overridden.
  */
 
 export type Mode = 'electric' | 'gas' | 'hybrid';
@@ -50,8 +56,30 @@ export interface Schedule {
   lastStartDate?: string | null;
 }
 
+/** The geyser's own settings, saved before a schedule takes control. */
+export interface SavedSettings {
+  isOn: boolean;
+  target_Temp?: number;
+  mode?: string;
+}
+
+/** What the function reads from DEVICES/{deviceId}. */
 export interface DeviceScheduleState {
   activeScheduleId?: string | null;
+  isOn?: boolean;
+  target_Temp?: number;
+  mode?: string;
+  beforeSchedule?: SavedSettings | null;
+}
+
+/** Copies only the settings that are present and valid. */
+function snapshotSettings(device: DeviceScheduleState | null | undefined): SavedSettings {
+  const saved: SavedSettings = { isOn: device?.isOn === true };
+  if (typeof device?.target_Temp === 'number' && Number.isFinite(device.target_Temp)) {
+    saved.target_Temp = device.target_Temp;
+  }
+  if (typeof device?.mode === 'string' && device.mode) saved.mode = device.mode;
+  return saved;
 }
 
 export interface DevicePlan {
@@ -274,6 +302,9 @@ export function planDevice(
       mode: winner.schedule.mode,
       activeScheduleId: winner.id,
     };
+    // First schedule taking control: remember the geyser's own settings.
+    // (When one schedule takes over from another, keep the original ones.)
+    if (!activeId) plan.deviceUpdates.beforeSchedule = snapshotSettings(device);
     // Mark every schedule that opened as started, so a losing schedule
     // doesn't take over later in the same window.
     for (const { id, occurrence } of starting) {
@@ -301,8 +332,15 @@ export function planDevice(
       };
       plan.log.push(`${activeId} ended; back to ${back.id} (${back.schedule.temperature}°C, ${back.schedule.mode})`);
     } else {
-      plan.deviceUpdates = { isOn: false, activeScheduleId: null };
-      plan.log.push(`stop ${activeId}`);
+      const saved = device?.beforeSchedule;
+      if (saved) {
+        // Put back what the geyser was doing before the schedules.
+        plan.deviceUpdates = { ...saved, isOn: saved.isOn === true, activeScheduleId: null, beforeSchedule: null };
+        plan.log.push(`stop ${activeId}; restored ${saved.isOn ? 'ON' : 'OFF'} ${saved.target_Temp ?? ''} ${saved.mode ?? ''}`);
+      } else {
+        plan.deviceUpdates = { isOn: false, activeScheduleId: null };
+        plan.log.push(`stop ${activeId}`);
+      }
     }
   }
 

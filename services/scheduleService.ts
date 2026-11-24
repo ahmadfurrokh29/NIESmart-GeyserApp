@@ -282,6 +282,27 @@ class ScheduleService {
     return this.online;
   }
 
+  /** Number of schedule changes saved on this phone but not yet sent to Firebase. */
+  getPendingCount(): number {
+    return this.outbox.length;
+  }
+
+  /**
+   * Used on logout: stop syncing and delete every schedule copy and unsent
+   * change stored on this phone. (Everything that was synced is still in
+   * Firebase and is downloaded again at the next login.)
+   */
+  async clearLocalData(): Promise<void> {
+    this.stop();
+    try {
+      const keys = await AsyncStorage.getAllKeys();
+      const ours = keys.filter((k) => k.startsWith('@schedules_cache:') || k.startsWith('@schedules_outbox:'));
+      if (ours.length > 0) await AsyncStorage.multiRemove(ours);
+    } catch (error) {
+      console.warn('scheduleService - could not clear phone storage', error);
+    }
+  }
+
   /** Current list: Firebase data with any not-yet-sent changes applied on top. */
   getSchedules(): Schedule[] {
     const merged: Record<string, Schedule> = { ...this.remote };

@@ -18,7 +18,7 @@ import { GradientButton } from '../../components/GradientButton';
 import { MetricCard } from '../../components/MetricCard';
 import { getIconName } from '../../constants/iconMappings';
 import { gradients, theme } from '../../constants/theme';
-import { useGeyser } from '../../contexts/GeyserContext';
+import { isOfflineError, useGeyser } from '../../contexts/GeyserContext';
 
 const screenWidth = Dimensions.get("window").width;
 
@@ -248,6 +248,7 @@ const SetTempScreen = () => {
                 await updateDeviceSettings(temp, normalizedMode);
                 setAlertConfig(showSuccess('Success', 'Temperature set!'));
               } catch (error) {
+                if (isOfflineError(error)) return; // the "No internet" popup is already shown
                 console.error('Error updating temperature:', error);
                 setAlertConfig(showError('Error', 'Update failed'));
               } finally {

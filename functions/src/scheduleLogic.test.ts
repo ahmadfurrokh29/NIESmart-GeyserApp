@@ -135,9 +135,15 @@ describe('findOpenOccurrence', () => {
 });
 
 describe('planDevice', () => {
-  it('turns the geyser on when a schedule opens', () => {
+  it('turns the geyser on when a schedule opens, saving the settings it had before', () => {
     const plan = planDevice({ a: schedule() }, {}, pkt(MON, '07:00'));
-    assert.deepEqual(plan.deviceUpdates, { isOn: true, target_Temp: 50, mode: 'gas', activeScheduleId: 'a' });
+    assert.deepEqual(plan.deviceUpdates, {
+      isOn: true,
+      target_Temp: 50,
+      mode: 'gas',
+      activeScheduleId: 'a',
+      beforeSchedule: { isOn: false },
+    });
     assert.deepEqual(plan.scheduleUpdates, { a: { lastStartDate: MON } });
   });
 
@@ -270,6 +276,51 @@ describe('planDevice', () => {
     );
     assert.equal(plan.deviceUpdates.activeScheduleId, 'good');
     assert.ok(plan.log.some((line) => line.startsWith('skip bad')));
+  });
+
+  it('restores manual settings when the schedule ends (geyser was on by hand)', () => {
+    const before = { isOn: true, target_Temp: 40, mode: 'gas' };
+    const s = { a: schedule({ startTime: '07:00', endTime: '07:30', temperature: 60, mode: 'electric' }) };
+
+    const start = planDevice(s, { ...before, activeScheduleId: null }, pkt(MON, '07:00'));
+    assert.deepEqual(start.deviceUpdates.beforeSchedule, before);
+
+    s.a.lastStartDate = MON;
+    const end = planDevice(
+      s,
+      { isOn: true, target_Temp: 60, mode: 'electric', activeScheduleId: 'a', beforeSchedule: before },
+      pkt(MON, '07:30'),
+    );
+    assert.deepEqual(end.deviceUpdates, {
+      isOn: true,
+      target_Temp: 40,
+      mode: 'gas',
+      activeScheduleId: null,
+      beforeSchedule: null,
+    });
+  });
+
+  it('turns off at the end when the geyser was off before', () => {
+    const before = { isOn: false, target_Temp: 40, mode: 'gas' };
+    const end = planDevice(
+      { a: schedule({ lastStartDate: MON }) },
+      { isOn: true, activeScheduleId: 'a', beforeSchedule: before },
+      pkt(MON, '07:30'),
+    );
+    assert.deepEqual(end.deviceUpdates, { ...before, activeScheduleId: null, beforeSchedule: null });
+  });
+
+  it('keeps the original saved settings when one schedule takes over from another', () => {
+    const plan = planDevice(
+      {
+        a: schedule({ startTime: '07:00', endTime: '08:00', lastStartDate: MON }),
+        b: schedule({ startTime: '07:15', endTime: '07:45' }),
+      },
+      { isOn: true, target_Temp: 50, mode: 'gas', activeScheduleId: 'a', beforeSchedule: { isOn: true, target_Temp: 40 } },
+      pkt(MON, '07:15'),
+    );
+    assert.equal(plan.deviceUpdates.activeScheduleId, 'b');
+    assert.equal('beforeSchedule' in plan.deviceUpdates, false);
   });
 
   it('does nothing when there are no schedules and nothing is running', () => {

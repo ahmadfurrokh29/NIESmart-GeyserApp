@@ -5,6 +5,7 @@ import {
     update
 } from 'firebase/database';
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { NoInternetPopup } from '../components/NoInternetPopup';
 import { database } from '../config/firebase';
 import { scheduleService } from '../services/scheduleService';
 import { useAuth } from './AuthContext';
@@ -17,11 +18,31 @@ export interface DeviceData {
   userId?: string;
   /** Set by the Cloud Function while a schedule is running the geyser. */
   activeScheduleId?: string | null;
+  /** Settings saved by the Cloud Function before a schedule took control. */
+  beforeSchedule?: { isOn: boolean; target_Temp?: number; mode?: string } | null;
+  /**
+   * Written by the HARDWARE (ESP32): true when the geyser is really heating
+   * (measured by its sensors), false when not. The app only reads it, to show
+   * the mode icon on Home. Missing = false.
+   */
+  Geyser_state?: boolean;
 }
+
+/** Thrown when a geyser command is blocked because the phone is offline. */
+export class OfflineError extends Error {
+  constructor() {
+    super('No internet connection');
+    this.name = 'OfflineError';
+  }
+}
+
+export const isOfflineError = (error: unknown): boolean => error instanceof OfflineError;
 
 interface GeyserContextType {
   device: DeviceData | null;
   loading: boolean;
+  /** True when the phone is connected to Firebase (has internet). */
+  isOnline: boolean;
   updateDeviceSettings: (temperature: number, mode: string) => Promise<void>;
   updateGeyserOnOff: (isOn: boolean) => Promise<void>;
   updateDeviceMode: (mode: 'electric' | 'gas' | 'hybrid') => Promise<void>;
@@ -49,6 +70,25 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [loading, setLoading] = useState(true);
   const [userSelectedMode, setUserSelectedMode] = useState<'electric' | 'gas' | 'hybrid'>('electric');
   const [lastUserModeChange, setLastUserModeChange] = useState<number>(0);
+  const [isOnline, setIsOnline] = useState(false);
+  const [showNoInternet, setShowNoInternet] = useState(false);
+
+  // Firebase tells us when this phone is connected to it (i.e. has internet).
+  useEffect(() => {
+    return onValue(ref(database, '.info/connected'), (snapshot) => setIsOnline(snapshot.val() === true));
+  }, []);
+
+  /**
+   * Geyser commands are only sent when online. Otherwise Firebase would keep
+   * them and send them whenever the phone reconnects, maybe hours later,
+   * switching the geyser when nobody expects it.
+   */
+  const requireOnline = () => {
+    if (!isOnline) {
+      setShowNoInternet(true);
+      throw new OfflineError();
+    }
+  };
 
   // Helper function to normalize mode case - now accepts both formats
   const normalizeMode = (mode: string): 'electric' | 'gas' | 'hybrid' => {
@@ -192,10 +232,15 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       throw new Error('No device claimed');
     }
 
+    requireOnline();
     const deviceRef = ref(database, `DEVICES/${claimedDeviceId}`);
     await update(deviceRef, {
       target_Temp: temperature,
-      mode: mode as 'electric' | 'gas' | 'hybrid'
+      mode: mode as 'electric' | 'gas' | 'hybrid',
+      // A manual change stops a running schedule for today (it still runs on its
+      // next day) and cancels restoring the settings saved before it.
+      activeScheduleId: null,
+      beforeSchedule: null,
     });
   };
 
@@ -205,12 +250,14 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       throw new Error('No device claimed');
     }
 
+    requireOnline();
     const deviceRef = ref(database, `DEVICES/${claimedDeviceId}`);
     await update(deviceRef, {
       isOn: isOn,
-      // A manual on/off overrides any running schedule, so the Cloud Function
-      // won't switch the geyser off (or back on) for that schedule.
+      // A manual change stops a running schedule for today (it still runs on its
+      // next day) and cancels restoring the settings saved before it.
       activeScheduleId: null,
+      beforeSchedule: null,
     });
   };
 
@@ -221,6 +268,7 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     console.log('GeyserContext - updateDeviceMode called with:', mode);
+    requireOnline();
     
     // Update user's selected mode immediately for UI responsiveness
     setUserSelectedMode(mode);
@@ -230,7 +278,11 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const deviceRef = ref(database, `DEVICES/${claimedDeviceId}`);
     await update(deviceRef, {
-      mode: mode
+      mode: mode,
+      // A manual change stops a running schedule for today (it still runs on its
+      // next day) and cancels restoring the settings saved before it.
+      activeScheduleId: null,
+      beforeSchedule: null,
     });
   };
 
@@ -311,6 +363,7 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     await update(ref(database), {
       [`DEVICES/${claimedDeviceId}/userId`]: null,
       [`DEVICES/${claimedDeviceId}/activeScheduleId`]: null,
+      [`DEVICES/${claimedDeviceId}/beforeSchedule`]: null,
       [`users/${userId}/claimedDeviceId`]: null,
     });
 
@@ -396,6 +449,7 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const value: GeyserContextType = {
     device,
     loading,
+    isOnline,
     updateDeviceSettings,
     updateGeyserOnOff,
     updateDeviceMode,
@@ -410,6 +464,7 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   return (
     <GeyserContext.Provider value={value}>
       {children}
+      <NoInternetPopup visible={showNoInternet} onHide={() => setShowNoInternet(false)} />
     </GeyserContext.Provider>
   );
 };

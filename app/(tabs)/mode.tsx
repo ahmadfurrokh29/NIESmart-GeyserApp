@@ -14,7 +14,7 @@ import { CustomAlert, showError, showInfo, showSuccess } from '../../components/
 import { DarkCard } from '../../components/DarkCard';
 import { GradientButton } from '../../components/GradientButton';
 import { gradients, theme } from '../../constants/theme';
-import { useGeyser } from '../../contexts/GeyserContext';
+import { isOfflineError, useGeyser } from '../../contexts/GeyserContext';
 
 const screenWidth = Dimensions.get('window').width;
 
@@ -118,6 +118,7 @@ const ModeScreen = () => {
       await updateDeviceMode(selectedMode);
       setAlertConfig(showSuccess('Success', 'Mode changed!'));
     } catch (error) {
+      if (isOfflineError(error)) return; // the "No internet" popup is already shown
       console.error('Error updating mode:', error);
               setAlertConfig(showError('Error', 'Update failed'));
     } finally {
