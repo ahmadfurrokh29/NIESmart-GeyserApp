@@ -455,10 +455,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing.sm,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: 4,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: 'rgba(0,0,0,0.25)', // keeps the icons readable on the photo background
   },
   temperatureDisplay: {
     alignItems: 'center',

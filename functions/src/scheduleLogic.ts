@@ -138,8 +138,15 @@ function pad(n: number): string {
 /** Breaks `now` into the local date, weekday and minute in `timeZone`. */
 export function getLocalNow(now: Date, timeZone: string): LocalNow {
   const parts: Record<string, string> = {};
-  for (const part of getFormatter(timeZone).formatToParts(now)) {
-    parts[part.type] = part.value;
+  try {
+    for (const part of getFormatter(timeZone).formatToParts(now)) {
+      parts[part.type] = part.value;
+    }
+  } catch {
+    // Some phone JavaScript engines lack full time-zone support; use the fallback below.
+  }
+  if (WEEKDAYS.indexOf(parts.weekday) < 0 || !parts.year) {
+    return getLocalNowFixedOffset(now, timeZone);
   }
   const year = Number(parts.year);
   const month = Number(parts.month);
@@ -156,6 +163,26 @@ export function getLocalNow(now: Date, timeZone: string): LocalNow {
       weekday: (weekday + 6) % 7,
     },
     minuteOfDay: Number(parts.hour) * 60 + Number(parts.minute),
+  };
+}
+
+/** Fixed UTC offsets (minutes) for time zones without daylight saving. */
+const FIXED_OFFSETS: Record<string, number> = { 'Asia/Karachi': 5 * 60 };
+
+/**
+ * Fallback when Intl time zones are not available (e.g. on some phones,
+ * where this file is also used by the app's local scheduler).
+ * Uses a fixed offset for known zones, otherwise the device's own time zone.
+ */
+export function getLocalNowFixedOffset(now: Date, timeZone: string): LocalNow {
+  const offset = FIXED_OFFSETS[timeZone] ?? -now.getTimezoneOffset();
+  const shifted = new Date(now.getTime() + offset * 60_000); // read with getUTC* = local wall clock
+  const prev = new Date(shifted.getTime() - 24 * 60 * 60_000);
+  const fmt = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  return {
+    today: { date: fmt(shifted), weekday: shifted.getUTCDay() },
+    yesterday: { date: fmt(prev), weekday: prev.getUTCDay() },
+    minuteOfDay: shifted.getUTCHours() * 60 + shifted.getUTCMinutes(),
   };
 }
 

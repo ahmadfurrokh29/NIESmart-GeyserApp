@@ -38,7 +38,12 @@ export const GradientButton: React.FC<GradientButtonProps> = ({
         end={{ x: 1, y: 0 }}
         style={styles.gradient}
       >
+        {/* One line only: on phones with a large font setting the text shrinks to fit instead of wrapping. */}
         <Text
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.6}
+          maxFontSizeMultiplier={1.3}
           style={[
             styles.text,
             { fontSize, color: disabled ? theme.colors.textMuted : theme.colors.text },
@@ -61,7 +66,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.md,
   },
   text: {
     fontWeight: '600',

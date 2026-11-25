@@ -6,6 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { DarkCard } from '../../components/DarkCard';
 import { MetricCard } from '../../components/MetricCard';
 import { SCHEDULE_MODES, ScheduleEditorSheet, ScheduleFormValues } from '../../components/ScheduleEditorSheet';
+import { SCHEDULER_MODE } from '../../constants/scheduler';
 import { theme } from '../../constants/theme';
 import { useGeyser } from '../../contexts/GeyserContext';
 import { endsNextDay, formatDays, formatTime12, Schedule, scheduleService } from '../../services/scheduleService';
@@ -218,6 +219,17 @@ const SchedulingScreen = () => {
           />
         </View>
 
+        {/* Test mode: schedules run from this phone (constants/scheduler.ts) */}
+        {SCHEDULER_MODE === 'local' && (
+          <View style={styles.testModeBanner}>
+            <MaterialCommunityIcons name="cellphone-cog" size={18} color={theme.colors.secondary} />
+            <Text style={styles.testModeText}>
+              Test mode: schedules run from this phone, checked every 10 s (also in the background in the installed
+              app; in Expo Go only while open). Nothing runs while the phone is off.
+            </Text>
+          </View>
+        )}
+
         {/* Offline banner */}
         {!online && !isLoading && (
           <View style={styles.offlineBanner}>
@@ -314,6 +326,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: theme.colors.warning + '80',
     backgroundColor: theme.colors.warning + '14',
+  },
+  testModeBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: theme.spacing.sm,
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.lg,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.secondary + '80',
+    backgroundColor: theme.colors.secondary + '14',
+  },
+  testModeText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    color: theme.colors.secondary,
   },
   offlineText: {
     flex: 1,

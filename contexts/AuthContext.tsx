@@ -14,6 +14,7 @@ import {
     update
 } from 'firebase/database';
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { stopLocalScheduler } from '../services/localScheduler';
 import { scheduleService } from '../services/scheduleService';
 import { auth, database } from '../config/firebase';
 
@@ -262,6 +263,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       
       // Remove this user's schedules saved on the phone (privacy).
+      await stopLocalScheduler();
       await scheduleService.clearLocalData();
 
       // Sign out from Firebase

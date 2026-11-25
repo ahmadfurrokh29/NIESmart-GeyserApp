@@ -35,7 +35,9 @@
         "SCHEDULE_EXACT_ALARM",
         "USE_EXACT_ALARM",
         "FOREGROUND_SERVICE",
-        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.POST_NOTIFICATIONS"
       ],
       "package": "com.hassan5566.smartiotgeyser",
       "versionCode": 1,
@@ -59,7 +61,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
-      ]
+      ],
+      "./plugins/withBackgroundActions"
     ],
     "experiments": {
       "typedRoutes": true
@@ -67,9 +70,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "6ee41e93-82b2-471c-a308-77afaf9396c2"
+        "projectId": "7b82662b-6905-485e-91b4-05b6180c70f9"
       }
     },
-    "owner": "apple420"
+    "owner": "ahmadfrrs-team"
   }
 }

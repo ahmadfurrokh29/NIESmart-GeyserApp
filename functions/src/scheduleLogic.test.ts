@@ -4,6 +4,7 @@ import {
   findOpenOccurrence,
   getWindowMinutes,
   getLocalNow,
+  getLocalNowFixedOffset,
   normalizeDays,
   parseStartTime,
   planDevice,
@@ -45,6 +46,12 @@ describe('getLocalNow', () => {
     assert.deepEqual(local.today, { date: MON, weekday: 1 });
     assert.deepEqual(local.yesterday, { date: '2026-11-15', weekday: 0 });
     assert.equal(local.minuteOfDay, 90); // 01:30
+  });
+
+  it('fixed-offset fallback gives the same answer as Intl for Pakistan', () => {
+    for (const d of [new Date('2026-11-15T20:30:00Z'), pkt('2027-01-01', '06:00'), pkt(MON, '23:59')]) {
+      assert.deepEqual(getLocalNowFixedOffset(d, 'Asia/Karachi'), getLocalNow(d, 'Asia/Karachi'));
+    }
   });
 
   it('handles month and year boundaries for "yesterday"', () => {

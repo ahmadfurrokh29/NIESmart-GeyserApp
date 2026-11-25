@@ -7,6 +7,7 @@ import {
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { NoInternetPopup } from '../components/NoInternetPopup';
 import { database } from '../config/firebase';
+import { startLocalScheduler, stopLocalScheduler } from '../services/localScheduler';
 import { scheduleService } from '../services/scheduleService';
 import { useAuth } from './AuthContext';
 
@@ -159,6 +160,10 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     
     // Keep this device's schedules in sync with Firebase (cloud scheduling).
     if (claimedDeviceId) {
+      // TEST MODE: run the schedules from this phone (does nothing in 'cloud' mode).
+      startLocalScheduler(claimedDeviceId).catch((error) =>
+        console.error('GeyserContext - Error starting local scheduler:', error),
+      );
       scheduleService.start(claimedDeviceId).catch((error) =>
         console.error('GeyserContext - Error starting schedule sync:', error),
       );
@@ -370,6 +375,7 @@ export const GeyserProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     // The geyser's schedules belong to this owner, so remove them too
     // (in Firebase and on this phone); the next owner starts fresh.
     try {
+      await stopLocalScheduler();
       await scheduleService.deleteAllForDevice(claimedDeviceId);
     } catch (error) {
       console.error('GeyserContext - Error removing schedules on unclaim:', error);

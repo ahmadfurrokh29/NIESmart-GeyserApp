@@ -1,7 +1,6 @@
 import { Stack, useRouter } from "expo-router";
 import * as SplashScreenLib from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
-import * as TaskManager from 'expo-task-manager';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Text, View } from 'react-native';
 import SplashScreen from '../components/SplashScreen';
@@ -9,6 +8,8 @@ import { theme } from '../constants/theme';
 import { AuthProvider, useAuth } from '../contexts/AuthContext';
 import { GeyserProvider } from '../contexts/GeyserContext';
 import { ToastProvider } from '../contexts/ToastContext';
+// Imported here so its background task is defined as soon as the app loads.
+import { cleanUpBackgroundTasks } from '../services/localScheduler';
 import './globals.css';
 
 // Keep splash screen visible while we initialize the app
@@ -20,13 +21,10 @@ function RootLayoutNav() {
   const [initialLoad, setInitialLoad] = useState(true);
   const [showSplash, setShowSplash] = useState(true);
 
-  // Schedules now run in the cloud (Firebase Cloud Function `runSchedules`).
-  // Remove background tasks that older versions of the app registered on
-  // this phone, so the OS stops waking the app up for them.
+  // Remove background tasks we no longer use (from older app versions, or the
+  // local scheduler when SCHEDULER_MODE is 'cloud'). See constants/scheduler.ts.
   useEffect(() => {
-    TaskManager.unregisterAllTasksAsync().catch(() => {
-      // Not supported in some environments (e.g. web); nothing to clean up there.
-    });
+    cleanUpBackgroundTasks();
   }, []);
 
   // 1. Effect for splash screen
